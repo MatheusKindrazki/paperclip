@@ -1132,6 +1132,97 @@ export function agentRoutes(
     },
   );
 
+  router.get("/companies/:companyId/agents/bulk-status", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+
+    const idsRaw = req.query.ids as string | undefined;
+    const statusRaw = req.query.status as string | undefined;
+    const ids = idsRaw ? idsRaw.split(",").map((s) => s.trim()).filter(Boolean) : undefined;
+    const statuses = statusRaw ? statusRaw.split(",").map((s) => s.trim()).filter(Boolean) : undefined;
+
+    const conditions = [eq(agentsTable.companyId, companyId)];
+    if (ids && ids.length > 0) conditions.push(inArray(agentsTable.id, ids));
+    if (statuses && statuses.length > 0) conditions.push(inArray(agentsTable.status, statuses));
+
+    const agentRows = await db
+      .select({
+        id: agentsTable.id,
+        name: agentsTable.name,
+        role: agentsTable.role,
+        title: agentsTable.title,
+        status: agentsTable.status,
+        icon: agentsTable.icon,
+        adapterType: agentsTable.adapterType,
+        lastHeartbeatAt: agentsTable.lastHeartbeatAt,
+        budgetMonthlyCents: agentsTable.budgetMonthlyCents,
+        spentMonthlyCents: agentsTable.spentMonthlyCents,
+        pauseReason: agentsTable.pauseReason,
+        pausedAt: agentsTable.pausedAt,
+        reportsTo: agentsTable.reportsTo,
+      })
+      .from(agentsTable)
+      .where(and(...conditions))
+      .orderBy(agentsTable.name);
+
+    const agentIds = agentRows.map((a) => a.id);
+    let currentIssues: { assigneeAgentId: string; issueId: string; identifier: string | null; title: string; status: string }[] = [];
+    if (agentIds.length > 0) {
+      currentIssues = await db
+        .select({
+          assigneeAgentId: issuesTable.assigneeAgentId,
+          issueId: issuesTable.id,
+          identifier: issuesTable.identifier,
+          title: issuesTable.title,
+          status: issuesTable.status,
+        })
+        .from(issuesTable)
+        .where(
+          and(
+            eq(issuesTable.companyId, companyId),
+            inArray(issuesTable.assigneeAgentId, agentIds),
+            inArray(issuesTable.status, ["in_progress", "in_review"]),
+          ),
+        ) as typeof currentIssues;
+    }
+
+    const issuesByAgent = new Map<string, typeof currentIssues>();
+    for (const issue of currentIssues) {
+      if (!issue.assigneeAgentId) continue;
+      const list = issuesByAgent.get(issue.assigneeAgentId) ?? [];
+      list.push(issue);
+      issuesByAgent.set(issue.assigneeAgentId, list);
+    }
+
+    const result = agentRows.map((agent) => ({
+      id: agent.id,
+      name: agent.name,
+      role: agent.role,
+      title: agent.title,
+      status: agent.status,
+      icon: agent.icon,
+      adapterType: agent.adapterType,
+      lastHeartbeatAt: agent.lastHeartbeatAt,
+      budgetMonthlyCents: agent.budgetMonthlyCents,
+      spentMonthlyCents: agent.spentMonthlyCents,
+      budgetUtilizationPercent:
+        agent.budgetMonthlyCents > 0
+          ? Number(((agent.spentMonthlyCents / agent.budgetMonthlyCents) * 100).toFixed(2))
+          : 0,
+      pauseReason: agent.pauseReason,
+      pausedAt: agent.pausedAt,
+      reportsTo: agent.reportsTo,
+      currentIssues: (issuesByAgent.get(agent.id) ?? []).map((i) => ({
+        id: i.issueId,
+        identifier: i.identifier,
+        title: i.title,
+        status: i.status,
+      })),
+    }));
+
+    res.json(result);
+  });
+
   router.get("/companies/:companyId/agents", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
