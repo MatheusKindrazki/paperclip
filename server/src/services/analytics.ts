@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, lt, ne, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lt, ne, not, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, costEvents, heartbeatRuns, issues } from "@paperclipai/db";
 
@@ -54,8 +54,8 @@ export function analyticsService(db: Db) {
         .where(
           and(
             eq(issues.companyId, companyId),
-            sql`${issues.assigneeAgentId} = any(${agentIds})`,
-            sql`${issues.status} not in ('done', 'cancelled')`,
+            inArray(issues.assigneeAgentId, agentIds),
+            not(inArray(issues.status, ["done", "cancelled"])),
           ),
         )
         .groupBy(issues.assigneeAgentId);
@@ -72,7 +72,7 @@ export function analyticsService(db: Db) {
         .where(
           and(
             eq(heartbeatRuns.companyId, companyId),
-            sql`${heartbeatRuns.agentId} = any(${agentIds})`,
+            inArray(heartbeatRuns.agentId, agentIds),
             gte(heartbeatRuns.createdAt, start),
             lt(heartbeatRuns.createdAt, end),
           ),
@@ -91,7 +91,7 @@ export function analyticsService(db: Db) {
         .where(
           and(
             eq(costEvents.companyId, companyId),
-            sql`${costEvents.agentId} = any(${agentIds})`,
+            inArray(costEvents.agentId, agentIds),
             gte(costEvents.occurredAt, start),
             lt(costEvents.occurredAt, end),
           ),
