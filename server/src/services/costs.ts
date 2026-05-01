@@ -318,6 +318,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
     byIssue: async (companyId: string, range?: CostDateRange) => {
       const conditions: ReturnType<typeof eq>[] = [
         eq(costEvents.companyId, companyId),
+        eq(issues.companyId, companyId),
         isNotNull(costEvents.issueId),
       ];
       if (range?.from) conditions.push(gte(costEvents.occurredAt, range.from));
@@ -343,7 +344,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         .orderBy(desc(sumAsNumber(costEvents.costCents)));
     },
 
-    forIssue: async (issueId: string) => {
+    forIssue: async (companyId: string, issueId: string) => {
       const [row] = await db
         .select({
           costCents: sumAsNumber(costEvents.costCents),
@@ -353,7 +354,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
           runCount: sql<number>`count(distinct ${costEvents.heartbeatRunId})::int`,
         })
         .from(costEvents)
-        .where(eq(costEvents.issueId, issueId));
+        .where(and(eq(costEvents.companyId, companyId), eq(costEvents.issueId, issueId)));
       return row ?? { costCents: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, runCount: 0 };
     },
 

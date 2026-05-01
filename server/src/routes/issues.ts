@@ -2258,6 +2258,16 @@ export function issueRoutes(
     if (Array.isArray(req.body.blockedByIssueIds)) {
       previous.blockedByIssueIds = existingRelations?.blockedBy.map((relation) => relation.id) ?? [];
     }
+    // Capture featureValue mutations performed by the service (auto-default to "medium" on
+    // status->done) so they are traceable in the activity log even when the caller did not
+    // include featureValue in the request payload.
+    if (
+      issue.featureValue !== existing.featureValue &&
+      (updateFields as Record<string, unknown>).featureValue === undefined
+    ) {
+      (updateFields as Record<string, unknown>).featureValue = issue.featureValue;
+      previous.featureValue = existing.featureValue;
+    }
 
     const hasFieldChanges = Object.keys(previous).length > 0;
     const reopened =
