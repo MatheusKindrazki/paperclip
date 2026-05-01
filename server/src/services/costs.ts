@@ -315,6 +315,49 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         .orderBy(costEvents.provider, costEvents.biller, costEvents.billingType, costEvents.model);
     },
 
+    byIssue: async (companyId: string, range?: CostDateRange) => {
+      const conditions: ReturnType<typeof eq>[] = [
+        eq(costEvents.companyId, companyId),
+        eq(issues.companyId, companyId),
+        isNotNull(costEvents.issueId),
+      ];
+      if (range?.from) conditions.push(gte(costEvents.occurredAt, range.from));
+      if (range?.to) conditions.push(lte(costEvents.occurredAt, range.to));
+
+      return db
+        .select({
+          issueId: costEvents.issueId,
+          issueTitle: issues.title,
+          issueStatus: issues.status,
+          issueIdentifier: issues.identifier,
+          featureValue: issues.featureValue,
+          costCents: sumAsNumber(costEvents.costCents),
+          inputTokens: sumAsNumber(costEvents.inputTokens),
+          cachedInputTokens: sumAsNumber(costEvents.cachedInputTokens),
+          outputTokens: sumAsNumber(costEvents.outputTokens),
+          runCount: sql<number>`count(distinct ${costEvents.heartbeatRunId})::int`,
+        })
+        .from(costEvents)
+        .innerJoin(issues, eq(costEvents.issueId, issues.id))
+        .where(and(...conditions))
+        .groupBy(costEvents.issueId, issues.title, issues.status, issues.identifier, issues.featureValue)
+        .orderBy(desc(sumAsNumber(costEvents.costCents)));
+    },
+
+    forIssue: async (companyId: string, issueId: string) => {
+      const [row] = await db
+        .select({
+          costCents: sumAsNumber(costEvents.costCents),
+          inputTokens: sumAsNumber(costEvents.inputTokens),
+          cachedInputTokens: sumAsNumber(costEvents.cachedInputTokens),
+          outputTokens: sumAsNumber(costEvents.outputTokens),
+          runCount: sql<number>`count(distinct ${costEvents.heartbeatRunId})::int`,
+        })
+        .from(costEvents)
+        .where(and(eq(costEvents.companyId, companyId), eq(costEvents.issueId, issueId)));
+      return row ?? { costCents: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, runCount: 0 };
+    },
+
     byProject: async (companyId: string, range?: CostDateRange) => {
       const issueIdAsText = sql<string>`${issues.id}::text`;
       const runProjectLinks = db

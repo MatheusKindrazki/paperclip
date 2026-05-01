@@ -15,6 +15,7 @@ import {
   companyService,
   agentService,
   heartbeatService,
+  issueService,
   logActivity,
 } from "../services/index.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
@@ -58,6 +59,7 @@ export function costRoutes(
   const budgets = budgetService(db, budgetHooks);
   const companies = companyService(db);
   const agents = agentService(db);
+  const issues = issueService(db);
 
   router.post("/companies/:companyId/cost-events", validate(createCostEventSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
@@ -250,6 +252,26 @@ export function costRoutes(
     assertCompanyAccess(req, companyId);
     const range = parseCostDateRange(req.query);
     const rows = await costs.byProject(companyId, range);
+    res.json(rows);
+  });
+
+  router.get("/issues/:id/tokens", async (req, res) => {
+    const issueId = req.params.id as string;
+    const issue = await issues.getById(issueId);
+    if (!issue) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+    assertCompanyAccess(req, issue.companyId);
+    const row = await costs.forIssue(issue.companyId, issue.id);
+    res.json(row);
+  });
+
+  router.get("/companies/:companyId/costs/by-issue", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const range = parseCostDateRange(req.query);
+    const rows = await costs.byIssue(companyId, range);
     res.json(rows);
   });
 

@@ -1406,6 +1406,9 @@ const issueListSelect = {
   completedAt: issues.completedAt,
   cancelledAt: issues.cancelledAt,
   hiddenAt: issues.hiddenAt,
+  featureValue: issues.featureValue,
+  featureValueSetAt: issues.featureValueSetAt,
+  featureValueSetBy: issues.featureValueSetBy,
   createdAt: issues.createdAt,
   updatedAt: issues.updatedAt,
 };
@@ -2898,6 +2901,20 @@ export function issueService(db: Db) {
       }
 
       applyStatusSideEffects(issueData.status, patch);
+
+      // featureValue defaults to "medium" when transitioning to done
+      const nextFeatureValue =
+        issueData.featureValue !== undefined
+          ? issueData.featureValue
+          : issueData.status === "done" && !existing.featureValue
+            ? "medium"
+            : existing.featureValue;
+      if (nextFeatureValue !== undefined && nextFeatureValue !== existing.featureValue) {
+        patch.featureValue = nextFeatureValue;
+        patch.featureValueSetAt = new Date();
+        patch.featureValueSetBy = actorAgentId ?? actorUserId ?? null;
+      }
+
       if (issueData.status && issueData.status !== "done") {
         patch.completedAt = null;
       }
