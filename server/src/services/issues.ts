@@ -2135,7 +2135,7 @@ export function issueService(db: Db) {
         `);
       }
       if (filters?.status) {
-        const statuses = filters.status.split(",").map((s) => s.trim());
+        const statuses = Array.isArray(filters.status) ? filters.status : filters.status.split(",").map((s) => s.trim());
         conditions.push(statuses.length === 1 ? eq(issues.status, statuses[0]) : inArray(issues.status, statuses));
       }
       if (filters?.assigneeAgentId) {
@@ -2303,7 +2303,7 @@ export function issueService(db: Db) {
         unreadForUserCondition(companyId, userId),
       ];
       if (status) {
-        const statuses = status.split(",").map((s) => s.trim()).filter(Boolean);
+        const statuses = (Array.isArray(status) ? status : status.split(",")).map((s) => s.trim()).filter(Boolean);
         if (statuses.length === 1) {
           conditions.push(eq(issues.status, statuses[0]));
         } else if (statuses.length > 1) {
