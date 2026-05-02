@@ -1811,17 +1811,40 @@ export function agentRoutes(
       allowedSandboxProviders: allowedSandboxProvidersForAgent(createInput.adapterType),
     });
 
-    const createdAgent = await svc.create(companyId, {
+    const actor = getActorInfo(req);
+    const requestedBudget = Number(createInput.budgetMonthlyCents ?? 0);
+
+    const createPayload = {
       ...createInput,
       adapterConfig: normalizedAdapterConfig,
       runtimeConfig: normalizeNewAgentRuntimeConfig(createInput.runtimeConfig),
-      status: "idle",
+      status: "idle" as const,
       spentMonthlyCents: 0,
       lastHeartbeatAt: null,
-    });
+    };
+
+    let createdAgent: Awaited<ReturnType<typeof svc.create>>;
+    if (requestedBudget > 0) {
+      createdAgent = await db.transaction(async (tx) => {
+        const created = await agentService(tx as unknown as Db).create(companyId, createPayload);
+        await budgetService(tx as unknown as Db).upsertPolicy(
+          companyId,
+          {
+            scopeType: "agent",
+            scopeId: created.id,
+            amount: created.budgetMonthlyCents,
+            windowKind: "calendar_month_utc",
+          },
+          actor.actorType === "user" ? actor.actorId : null,
+        );
+        return created;
+      });
+    } else {
+      createdAgent = await svc.create(companyId, createPayload);
+    }
+
     const agent = await materializeDefaultInstructionsBundleForNewAgent(createdAgent, instructionsBundle);
 
-    const actor = getActorInfo(req);
     await logActivity(db, {
       companyId,
       actorType: actor.actorType,
@@ -1847,21 +1870,6 @@ export function agentRoutes(
       agent.id,
       req.actor.type === "board" ? (req.actor.userId ?? null) : null,
     );
-
-    if (agent.budgetMonthlyCents > 0) {
-      await db.transaction(async (tx) => {
-        await budgetService(tx as unknown as Db).upsertPolicy(
-          companyId,
-          {
-            scopeType: "agent",
-            scopeId: agent.id,
-            amount: agent.budgetMonthlyCents,
-            windowKind: "calendar_month_utc",
-          },
-          actor.actorType === "user" ? actor.actorId : null,
-        );
-      });
-    }
 
     res.status(201).json(agent);
   });

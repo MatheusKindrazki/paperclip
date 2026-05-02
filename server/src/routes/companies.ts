@@ -269,31 +269,39 @@ export function companyRoutes(db: Db, storage?: StorageService) {
     if (!(req.actor.source === "local_implicit" || req.actor.isInstanceAdmin)) {
       throw forbidden("Instance admin required");
     }
-    const company = await svc.create(req.body);
+    const requestedBudget = Number(req.body.budgetMonthlyCents ?? 0);
+    const actorUserId = req.actor.userId ?? "board";
+
+    let company: Awaited<ReturnType<typeof svc.create>>;
+    if (requestedBudget > 0) {
+      company = await db.transaction(async (tx) => {
+        const created = await companyService(tx as unknown as Db).create(req.body);
+        await budgetService(tx as unknown as Db).upsertPolicy(
+          created.id,
+          {
+            scopeType: "company",
+            scopeId: created.id,
+            amount: created.budgetMonthlyCents,
+            windowKind: "calendar_month_utc",
+          },
+          actorUserId,
+        );
+        return created;
+      });
+    } else {
+      company = await svc.create(req.body);
+    }
+
     await access.ensureMembership(company.id, "user", req.actor.userId ?? "local-board", "owner", "active");
     await logActivity(db, {
       companyId: company.id,
       actorType: "user",
-      actorId: req.actor.userId ?? "board",
+      actorId: actorUserId,
       action: "company.created",
       entityType: "company",
       entityId: company.id,
       details: { name: company.name },
     });
-    if (company.budgetMonthlyCents > 0) {
-      await db.transaction(async (tx) => {
-        await budgetService(tx as unknown as Db).upsertPolicy(
-          company.id,
-          {
-            scopeType: "company",
-            scopeId: company.id,
-            amount: company.budgetMonthlyCents,
-            windowKind: "calendar_month_utc",
-          },
-          req.actor.userId ?? "board",
-        );
-      });
-    }
     res.status(201).json(company);
   });
 
