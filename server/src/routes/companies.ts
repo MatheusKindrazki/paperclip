@@ -281,16 +281,18 @@ export function companyRoutes(db: Db, storage?: StorageService) {
       details: { name: company.name },
     });
     if (company.budgetMonthlyCents > 0) {
-      await budgets.upsertPolicy(
-        company.id,
-        {
-          scopeType: "company",
-          scopeId: company.id,
-          amount: company.budgetMonthlyCents,
-          windowKind: "calendar_month_utc",
-        },
-        req.actor.userId ?? "board",
-      );
+      await db.transaction(async (tx) => {
+        await budgetService(tx as unknown as Db).upsertPolicy(
+          company.id,
+          {
+            scopeType: "company",
+            scopeId: company.id,
+            amount: company.budgetMonthlyCents,
+            windowKind: "calendar_month_utc",
+          },
+          req.actor.userId ?? "board",
+        );
+      });
     }
     res.status(201).json(company);
   });
@@ -335,22 +337,29 @@ export function companyRoutes(db: Db, storage?: StorageService) {
       }
     }
 
-    const company = await svc.update(companyId, body);
+    let company: Awaited<ReturnType<typeof svc.update>>;
+    if (Object.prototype.hasOwnProperty.call(body, "budgetMonthlyCents")) {
+      company = await db.transaction(async (tx) => {
+        const updated = await companyService(tx as unknown as Db).update(companyId, body);
+        if (!updated) return null;
+        await budgetService(tx as unknown as Db).upsertPolicy(
+          updated.id,
+          {
+            scopeType: "company",
+            scopeId: updated.id,
+            amount: updated.budgetMonthlyCents,
+            windowKind: "calendar_month_utc",
+          },
+          actor.actorType === "user" ? actor.actorId : null,
+        );
+        return updated;
+      });
+    } else {
+      company = await svc.update(companyId, body);
+    }
     if (!company) {
       res.status(404).json({ error: "Company not found" });
       return;
-    }
-    if (Object.prototype.hasOwnProperty.call(body, "budgetMonthlyCents")) {
-      await budgets.upsertPolicy(
-        company.id,
-        {
-          scopeType: "company",
-          scopeId: company.id,
-          amount: company.budgetMonthlyCents,
-          windowKind: "calendar_month_utc",
-        },
-        actor.actorType === "user" ? actor.actorId : null,
-      );
     }
     await logActivity(db, {
       companyId,

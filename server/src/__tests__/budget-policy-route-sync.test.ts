@@ -163,7 +163,8 @@ async function createAgentApp() {
     (req as any).actor = boardActor;
     next();
   });
-  app.use("/api", agentRoutes({} as any));
+  const mockTx = { transaction: vi.fn(async (fn: any) => fn(mockTx)) } as any;
+  app.use("/api", agentRoutes(mockTx));
   app.use(errorHandler);
   return app;
 }
@@ -179,7 +180,8 @@ async function createCompanyApp() {
     (req as any).actor = boardActor;
     next();
   });
-  app.use("/api/companies", companyRoutes({} as any));
+  const mockTx = { transaction: vi.fn(async (fn: any) => fn(mockTx)) } as any;
+  app.use("/api/companies", companyRoutes(mockTx));
   app.use(errorHandler);
   return app;
 }
@@ -211,6 +213,21 @@ describe("budget policy sync on PATCH routes", () => {
         },
         "local-board",
       );
+    });
+
+    it("rolls back agent update when upsertPolicy throws (atomicity)", async () => {
+      mockAgentService.getById.mockResolvedValue(baseAgent);
+      mockAgentService.update.mockResolvedValue({ ...baseAgent, budgetMonthlyCents: 25000 });
+      mockBudgetService.upsertPolicy.mockRejectedValueOnce(new Error("DB deadlock"));
+
+      const app = await createAgentApp();
+      const res = await request(app)
+        .patch(`/api/agents/${baseAgent.id}`)
+        .send({ budgetMonthlyCents: 25000 });
+
+      expect(res.status).toBe(500);
+      expect(mockAgentService.update).toHaveBeenCalledTimes(1);
+      expect(mockBudgetService.upsertPolicy).toHaveBeenCalledTimes(1);
     });
 
     it("does NOT call budgetService.upsertPolicy when budgetMonthlyCents is absent", async () => {
@@ -271,6 +288,21 @@ describe("budget policy sync on PATCH routes", () => {
         },
         "local-board",
       );
+    });
+
+    it("rolls back company update when upsertPolicy throws (atomicity)", async () => {
+      mockCompanyService.getById.mockResolvedValue(baseCompany);
+      mockCompanyService.update.mockResolvedValue({ ...baseCompany, budgetMonthlyCents: 250000 });
+      mockBudgetService.upsertPolicy.mockRejectedValueOnce(new Error("DB deadlock"));
+
+      const app = await createCompanyApp();
+      const res = await request(app)
+        .patch(`/api/companies/${baseCompany.id}`)
+        .send({ budgetMonthlyCents: 250000 });
+
+      expect(res.status).toBe(500);
+      expect(mockCompanyService.update).toHaveBeenCalledTimes(1);
+      expect(mockBudgetService.upsertPolicy).toHaveBeenCalledTimes(1);
     });
 
     it("does NOT call budgetService.upsertPolicy when budgetMonthlyCents is absent", async () => {
