@@ -279,7 +279,21 @@ export function costRoutes(
     assertBoard(req);
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
-    const company = await companies.update(companyId, { budgetMonthlyCents: req.body.budgetMonthlyCents });
+    const company = await db.transaction(async (tx) => {
+      const updated = await companyService(tx as unknown as Db).update(companyId, { budgetMonthlyCents: req.body.budgetMonthlyCents });
+      if (!updated) return null;
+      await budgetService(tx as unknown as Db, budgetHooks).upsertPolicy(
+        companyId,
+        {
+          scopeType: "company",
+          scopeId: companyId,
+          amount: req.body.budgetMonthlyCents,
+          windowKind: "calendar_month_utc",
+        },
+        req.actor.userId ?? "board",
+      );
+      return updated;
+    });
     if (!company) {
       res.status(404).json({ error: "Company not found" });
       return;
@@ -295,17 +309,6 @@ export function costRoutes(
       details: { budgetMonthlyCents: req.body.budgetMonthlyCents },
     });
 
-    await budgets.upsertPolicy(
-      companyId,
-      {
-        scopeType: "company",
-        scopeId: companyId,
-        amount: req.body.budgetMonthlyCents,
-        windowKind: "calendar_month_utc",
-      },
-      req.actor.userId ?? "board",
-    );
-
     res.json(company);
   });
 
@@ -320,7 +323,21 @@ export function costRoutes(
     assertCompanyAccess(req, agent.companyId);
     assertBoard(req);
 
-    const updated = await agents.update(agentId, { budgetMonthlyCents: req.body.budgetMonthlyCents });
+    const updated = await db.transaction(async (tx) => {
+      const agentUpdated = await agentService(tx as unknown as Db).update(agentId, { budgetMonthlyCents: req.body.budgetMonthlyCents });
+      if (!agentUpdated) return null;
+      await budgetService(tx as unknown as Db, budgetHooks).upsertPolicy(
+        agentUpdated.companyId,
+        {
+          scopeType: "agent",
+          scopeId: agentUpdated.id,
+          amount: req.body.budgetMonthlyCents,
+          windowKind: "calendar_month_utc",
+        },
+        req.actor.type === "board" ? req.actor.userId ?? "board" : null,
+      );
+      return agentUpdated;
+    });
     if (!updated) {
       res.status(404).json({ error: "Agent not found" });
       return;
@@ -337,17 +354,6 @@ export function costRoutes(
       entityId: updated.id,
       details: { budgetMonthlyCents: updated.budgetMonthlyCents },
     });
-
-    await budgets.upsertPolicy(
-      updated.companyId,
-      {
-        scopeType: "agent",
-        scopeId: updated.id,
-        amount: updated.budgetMonthlyCents,
-        windowKind: "calendar_month_utc",
-      },
-      req.actor.type === "board" ? req.actor.userId ?? "board" : null,
-    );
 
     res.json(updated);
   });

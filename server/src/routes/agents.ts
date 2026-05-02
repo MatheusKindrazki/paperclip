@@ -1849,16 +1849,18 @@ export function agentRoutes(
     );
 
     if (agent.budgetMonthlyCents > 0) {
-      await budgets.upsertPolicy(
-        companyId,
-        {
-          scopeType: "agent",
-          scopeId: agent.id,
-          amount: agent.budgetMonthlyCents,
-          windowKind: "calendar_month_utc",
-        },
-        actor.actorType === "user" ? actor.actorId : null,
-      );
+      await db.transaction(async (tx) => {
+        await budgetService(tx as unknown as Db).upsertPolicy(
+          companyId,
+          {
+            scopeType: "agent",
+            scopeId: agent.id,
+            amount: agent.budgetMonthlyCents,
+            windowKind: "calendar_month_utc",
+          },
+          actor.actorType === "user" ? actor.actorId : null,
+        );
+      });
     }
 
     res.status(201).json(agent);
@@ -2280,29 +2282,41 @@ export function agentRoutes(
     }
 
     const actor = getActorInfo(req);
-    const agent = await svc.update(id, patchData, {
-      recordRevision: {
-        createdByAgentId: actor.agentId,
-        createdByUserId: actor.actorType === "user" ? actor.actorId : null,
-        source: "patch",
-      },
-    });
+    let agent: Awaited<ReturnType<typeof svc.update>>;
+    if (Object.prototype.hasOwnProperty.call(patchData, "budgetMonthlyCents")) {
+      agent = await db.transaction(async (tx) => {
+        const updated = await agentService(tx as unknown as Db).update(id, patchData, {
+          recordRevision: {
+            createdByAgentId: actor.agentId,
+            createdByUserId: actor.actorType === "user" ? actor.actorId : null,
+            source: "patch",
+          },
+        });
+        if (!updated) return null;
+        await budgetService(tx as unknown as Db).upsertPolicy(
+          updated.companyId,
+          {
+            scopeType: "agent",
+            scopeId: updated.id,
+            amount: updated.budgetMonthlyCents,
+            windowKind: "calendar_month_utc",
+          },
+          actor.actorType === "user" ? actor.actorId : null,
+        );
+        return updated;
+      });
+    } else {
+      agent = await svc.update(id, patchData, {
+        recordRevision: {
+          createdByAgentId: actor.agentId,
+          createdByUserId: actor.actorType === "user" ? actor.actorId : null,
+          source: "patch",
+        },
+      });
+    }
     if (!agent) {
       res.status(404).json({ error: "Agent not found" });
       return;
-    }
-
-    if (Object.prototype.hasOwnProperty.call(patchData, "budgetMonthlyCents")) {
-      await budgets.upsertPolicy(
-        agent.companyId,
-        {
-          scopeType: "agent",
-          scopeId: agent.id,
-          amount: agent.budgetMonthlyCents,
-          windowKind: "calendar_month_utc",
-        },
-        actor.actorType === "user" ? actor.actorId : null,
-      );
     }
 
     await logActivity(db, {
