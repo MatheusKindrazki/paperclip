@@ -25,7 +25,7 @@ function makeDb(overrides: Record<string, unknown> = {}) {
 
   const thenableChain = Object.assign(Promise.resolve([]), selectChain);
 
-  return {
+  const db: Record<string, unknown> = {
     select: vi.fn().mockReturnValue(thenableChain),
     insert: vi.fn().mockReturnValue({
       values: vi.fn().mockReturnValue({ returning: vi.fn().mockResolvedValue([]) }),
@@ -35,6 +35,14 @@ function makeDb(overrides: Record<string, unknown> = {}) {
     }),
     ...overrides,
   };
+  // Drizzle exposes db.transaction((tx) => ...). Service factories are mocked
+  // at the module level, so the tx identity does not matter — only that the
+  // callback is invoked. Routes added in PR #5 (PATCH .../budgets) and PR #6
+  // (POST atomicity) require this to exist.
+  if (!("transaction" in db)) {
+    db.transaction = vi.fn(async (fn: (tx: unknown) => unknown) => fn(db));
+  }
+  return db;
 }
 
 const mockCompanyService = vi.hoisted(() => ({
@@ -333,6 +341,63 @@ describe("cost routes", () => {
         details: { budgetMonthlyCents: 2500 },
       }),
     );
+  });
+
+  it("rolls back agent budget update when upsertPolicy throws (atomicity)", async () => {
+    mockAgentService.update.mockResolvedValueOnce({
+      id: "agent-1",
+      companyId: "company-1",
+      name: "Budget Agent",
+      budgetMonthlyCents: 2500,
+      spentMonthlyCents: 0,
+    });
+    mockBudgetService.upsertPolicy.mockRejectedValueOnce(new Error("DB deadlock"));
+
+    const app = await createAppWithActor({
+      type: "board",
+      userId: "board-user",
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: ["company-1"],
+    });
+
+    const res = await request(app)
+      .patch("/api/agents/agent-1/budgets")
+      .send({ budgetMonthlyCents: 2500 });
+
+    expect(res.status).toBe(500);
+    expect(mockAgentService.update).toHaveBeenCalledTimes(1);
+    expect(mockBudgetService.upsertPolicy).toHaveBeenCalledTimes(1);
+    // logActivity must NOT run when the transaction rejected
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it("rolls back company budget update when upsertPolicy throws (atomicity)", async () => {
+    mockCompanyService.update.mockResolvedValueOnce({
+      id: "company-1",
+      name: "Paperclip",
+      budgetMonthlyCents: 250000,
+      spentMonthlyCents: 0,
+    });
+    mockBudgetService.upsertPolicy.mockRejectedValueOnce(new Error("DB deadlock"));
+
+    const app = await createAppWithActor({
+      type: "board",
+      userId: "board-user",
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: ["company-1"],
+    });
+
+    const res = await request(app)
+      .patch("/api/companies/company-1/budgets")
+      .send({ budgetMonthlyCents: 250000 });
+
+    expect(res.status).toBe(500);
+    expect(mockCompanyService.update).toHaveBeenCalledTimes(1);
+    expect(mockBudgetService.upsertPolicy).toHaveBeenCalledTimes(1);
+    // logActivity must NOT run when the transaction rejected
+    expect(mockLogActivity).not.toHaveBeenCalled();
   });
 });
 

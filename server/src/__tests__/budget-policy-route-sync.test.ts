@@ -319,3 +319,65 @@ describe("budget policy sync on PATCH routes", () => {
     });
   });
 });
+
+describe("budget policy atomicity on POST routes", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  describe("POST /api/companies", () => {
+    it("wraps company creation and upsertPolicy in a single transaction when budgetMonthlyCents > 0", async () => {
+      mockCompanyService.create.mockResolvedValue({ ...baseCompany, budgetMonthlyCents: 250000 });
+
+      const app = await createCompanyApp();
+      const res = await request(app)
+        .post("/api/companies/")
+        .send({ name: "TestCo", budgetMonthlyCents: 250000 });
+
+      expect(res.status).toBe(201);
+      expect(mockCompanyService.create).toHaveBeenCalledTimes(1);
+      expect(mockBudgetService.upsertPolicy).toHaveBeenCalledTimes(1);
+      expect(mockBudgetService.upsertPolicy).toHaveBeenCalledWith(
+        baseCompany.id,
+        {
+          scopeType: "company",
+          scopeId: baseCompany.id,
+          amount: 250000,
+          windowKind: "calendar_month_utc",
+        },
+        "local-board",
+      );
+    });
+
+    it("rolls back company creation when upsertPolicy throws (atomicity)", async () => {
+      mockCompanyService.create.mockResolvedValue({ ...baseCompany, budgetMonthlyCents: 250000 });
+      mockBudgetService.upsertPolicy.mockRejectedValueOnce(new Error("DB deadlock"));
+
+      const app = await createCompanyApp();
+      const res = await request(app)
+        .post("/api/companies/")
+        .send({ name: "TestCo", budgetMonthlyCents: 250000 });
+
+      expect(res.status).toBe(500);
+      // svc.create was attempted inside the transaction
+      expect(mockCompanyService.create).toHaveBeenCalledTimes(1);
+      expect(mockBudgetService.upsertPolicy).toHaveBeenCalledTimes(1);
+      // ensureMembership and logActivity must NOT run after a failed tx
+      expect(mockAccessService.ensureMembership).not.toHaveBeenCalled();
+      expect(mockLogActivity).not.toHaveBeenCalled();
+    });
+
+    it("does NOT enter the transaction when budgetMonthlyCents is 0", async () => {
+      mockCompanyService.create.mockResolvedValue({ ...baseCompany, budgetMonthlyCents: 0 });
+
+      const app = await createCompanyApp();
+      const res = await request(app)
+        .post("/api/companies/")
+        .send({ name: "TestCo" });
+
+      expect(res.status).toBe(201);
+      expect(mockCompanyService.create).toHaveBeenCalledTimes(1);
+      expect(mockBudgetService.upsertPolicy).not.toHaveBeenCalled();
+    });
+  });
+});
