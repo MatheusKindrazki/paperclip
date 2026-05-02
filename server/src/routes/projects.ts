@@ -184,6 +184,21 @@ export function projectRoutes(db: Db) {
       return;
     }
     assertCompanyAccess(req, existing.companyId);
+
+    // Founder-only gate: agents cannot cancel projects.
+    // Project cancellation triggers downstream infra teardown (SRE container
+    // shutdown). Only board users (founders) may transition to "cancelled".
+    if (
+      req.body.status === "cancelled" &&
+      existing.status !== "cancelled" &&
+      req.actor.type !== "board"
+    ) {
+      res.status(403).json({
+        error: "Project cancellation requires a board user (founder). Agents cannot cancel projects.",
+      });
+      return;
+    }
+
     const body = { ...req.body };
     assertNoAgentHostWorkspaceCommandMutation(
       req,
