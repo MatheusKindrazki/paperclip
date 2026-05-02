@@ -144,11 +144,13 @@ export function agentRoutes(
   const svc = agentService(db);
   const access = accessService(db);
   const approvalsSvc = approvalService(db);
-  const budgets = budgetService(db);
   const environmentsSvc = environmentService(db);
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: options.pluginWorkerManager,
   });
+  const budgetHooks = {
+    cancelWorkForScope: heartbeat.cancelBudgetScopeWork,
+  };
   const recovery = recoveryService(db, { enqueueWakeup: heartbeat.wakeup });
   const issueApprovalsSvc = issueApprovalService(db);
   const secretsSvc = secretService(db);
@@ -1827,7 +1829,7 @@ export function agentRoutes(
     if (requestedBudget > 0) {
       createdAgent = await db.transaction(async (tx) => {
         const created = await agentService(tx as unknown as Db).create(companyId, createPayload);
-        await budgetService(tx as unknown as Db).upsertPolicy(
+        await budgetService(tx as unknown as Db, budgetHooks).upsertPolicy(
           companyId,
           {
             scopeType: "agent",
@@ -2301,7 +2303,7 @@ export function agentRoutes(
           },
         });
         if (!updated) return null;
-        await budgetService(tx as unknown as Db).upsertPolicy(
+        await budgetService(tx as unknown as Db, budgetHooks).upsertPolicy(
           updated.companyId,
           {
             scopeType: "agent",
