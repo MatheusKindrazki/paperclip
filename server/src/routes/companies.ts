@@ -21,6 +21,7 @@ import {
   companyPortabilityService,
   companyService,
   feedbackService,
+  heartbeatService,
   logActivity,
 } from "../services/index.js";
 import type { StorageService } from "../storage/types.js";
@@ -32,7 +33,10 @@ export function companyRoutes(db: Db, storage?: StorageService) {
   const agents = agentService(db);
   const portability = companyPortabilityService(db, storage);
   const access = accessService(db);
-  const budgets = budgetService(db);
+  const heartbeat = heartbeatService(db);
+  const budgetHooks = {
+    cancelWorkForScope: heartbeat.cancelBudgetScopeWork,
+  };
   const feedback = feedbackService(db);
 
   function parseBooleanQuery(value: unknown) {
@@ -276,7 +280,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
     if (requestedBudget > 0) {
       company = await db.transaction(async (tx) => {
         const created = await companyService(tx as unknown as Db).create(req.body);
-        await budgetService(tx as unknown as Db).upsertPolicy(
+        await budgetService(tx as unknown as Db, budgetHooks).upsertPolicy(
           created.id,
           {
             scopeType: "company",
@@ -350,7 +354,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
       company = await db.transaction(async (tx) => {
         const updated = await companyService(tx as unknown as Db).update(companyId, body);
         if (!updated) return null;
-        await budgetService(tx as unknown as Db).upsertPolicy(
+        await budgetService(tx as unknown as Db, budgetHooks).upsertPolicy(
           updated.id,
           {
             scopeType: "company",
