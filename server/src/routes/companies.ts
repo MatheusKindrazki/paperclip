@@ -340,6 +340,18 @@ export function companyRoutes(db: Db, storage?: StorageService) {
       res.status(404).json({ error: "Company not found" });
       return;
     }
+    if (Object.prototype.hasOwnProperty.call(body, "budgetMonthlyCents")) {
+      await budgets.upsertPolicy(
+        company.id,
+        {
+          scopeType: "company",
+          scopeId: company.id,
+          amount: company.budgetMonthlyCents,
+          windowKind: "calendar_month_utc",
+        },
+        actor.actorType === "user" ? actor.actorId : null,
+      );
+    }
     await logActivity(db, {
       companyId,
       actorType: actor.actorType,

@@ -2292,6 +2292,19 @@ export function agentRoutes(
       return;
     }
 
+    if (Object.prototype.hasOwnProperty.call(patchData, "budgetMonthlyCents")) {
+      await budgets.upsertPolicy(
+        agent.companyId,
+        {
+          scopeType: "agent",
+          scopeId: agent.id,
+          amount: agent.budgetMonthlyCents,
+          windowKind: "calendar_month_utc",
+        },
+        actor.actorType === "user" ? actor.actorId : null,
+      );
+    }
+
     await logActivity(db, {
       companyId: agent.companyId,
       actorType: actor.actorType,
