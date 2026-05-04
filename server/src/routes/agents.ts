@@ -2306,18 +2306,19 @@ export function agentRoutes(
 
     if (hasOwn(patchData, "budgetMonthlyCents")) {
       const nextBudget = typeof patchData.budgetMonthlyCents === "number" ? patchData.budgetMonthlyCents : 0;
-      if (nextBudget > 0) {
-        await budgets.upsertPolicy(
-          agent.companyId,
-          {
-            scopeType: "agent",
-            scopeId: agent.id,
-            amount: nextBudget,
-            windowKind: "calendar_month_utc",
-          },
-          req.actor.type === "board" ? (req.actor.userId ?? null) : null,
-        );
-      }
+      // Always call upsertPolicy even when amount is 0; budgets.upsertPolicy
+      // computes nextIsActive = amount > 0, so amount=0 deactivates the
+      // policy. Previously the guard here left stale active policies.
+      await budgets.upsertPolicy(
+        agent.companyId,
+        {
+          scopeType: "agent",
+          scopeId: agent.id,
+          amount: nextBudget,
+          windowKind: "calendar_month_utc",
+        },
+        req.actor.type === "board" ? (req.actor.userId ?? null) : null,
+      );
     }
 
     res.json(agent);
