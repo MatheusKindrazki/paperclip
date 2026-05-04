@@ -269,29 +269,39 @@ export function companyRoutes(db: Db, storage?: StorageService) {
     if (!(req.actor.source === "local_implicit" || req.actor.isInstanceAdmin)) {
       throw forbidden("Instance admin required");
     }
-    const company = await svc.create(req.body);
+    const requestedBudget = Number(req.body.budgetMonthlyCents ?? 0);
+    const actorUserId = req.actor.userId ?? "board";
+
+    let company: Awaited<ReturnType<typeof svc.create>>;
+    if (requestedBudget > 0) {
+      company = await db.transaction(async (tx) => {
+        const created = await companyService(tx as unknown as Db).create(req.body);
+        await budgetService(tx as unknown as Db).upsertPolicy(
+          created.id,
+          {
+            scopeType: "company",
+            scopeId: created.id,
+            amount: created.budgetMonthlyCents,
+            windowKind: "calendar_month_utc",
+          },
+          actorUserId,
+        );
+        return created;
+      });
+    } else {
+      company = await svc.create(req.body);
+    }
+
     await access.ensureMembership(company.id, "user", req.actor.userId ?? "local-board", "owner", "active");
     await logActivity(db, {
       companyId: company.id,
       actorType: "user",
-      actorId: req.actor.userId ?? "board",
+      actorId: actorUserId,
       action: "company.created",
       entityType: "company",
       entityId: company.id,
       details: { name: company.name },
     });
-    if (company.budgetMonthlyCents > 0) {
-      await budgets.upsertPolicy(
-        company.id,
-        {
-          scopeType: "company",
-          scopeId: company.id,
-          amount: company.budgetMonthlyCents,
-          windowKind: "calendar_month_utc",
-        },
-        req.actor.userId ?? "board",
-      );
-    }
     res.status(201).json(company);
   });
 
@@ -335,22 +345,29 @@ export function companyRoutes(db: Db, storage?: StorageService) {
       }
     }
 
-    const company = await svc.update(companyId, body);
+    let company: Awaited<ReturnType<typeof svc.update>>;
+    if (Object.prototype.hasOwnProperty.call(body, "budgetMonthlyCents")) {
+      company = await db.transaction(async (tx) => {
+        const updated = await companyService(tx as unknown as Db).update(companyId, body);
+        if (!updated) return null;
+        await budgetService(tx as unknown as Db).upsertPolicy(
+          updated.id,
+          {
+            scopeType: "company",
+            scopeId: updated.id,
+            amount: updated.budgetMonthlyCents,
+            windowKind: "calendar_month_utc",
+          },
+          actor.actorType === "user" ? actor.actorId : null,
+        );
+        return updated;
+      });
+    } else {
+      company = await svc.update(companyId, body);
+    }
     if (!company) {
       res.status(404).json({ error: "Company not found" });
       return;
-    }
-    if (Object.prototype.hasOwnProperty.call(body, "budgetMonthlyCents")) {
-      await budgets.upsertPolicy(
-        company.id,
-        {
-          scopeType: "company",
-          scopeId: company.id,
-          amount: company.budgetMonthlyCents,
-          windowKind: "calendar_month_utc",
-        },
-        actor.actorType === "user" ? actor.actorId : null,
-      );
     }
     await logActivity(db, {
       companyId,
