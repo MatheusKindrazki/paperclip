@@ -2304,6 +2304,22 @@ export function agentRoutes(
       details: summarizeAgentUpdateDetails(patchData),
     });
 
+    if (hasOwn(patchData, "budgetMonthlyCents")) {
+      const nextBudget = typeof patchData.budgetMonthlyCents === "number" ? patchData.budgetMonthlyCents : 0;
+      if (nextBudget > 0) {
+        await budgets.upsertPolicy(
+          agent.companyId,
+          {
+            scopeType: "agent",
+            scopeId: agent.id,
+            amount: nextBudget,
+            windowKind: "calendar_month_utc",
+          },
+          req.actor.type === "board" ? (req.actor.userId ?? null) : null,
+        );
+      }
+    }
+
     res.json(agent);
   });
 
@@ -2336,7 +2352,13 @@ export function agentRoutes(
   router.post("/agents/:id/resume", async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
-    if (!(await getAccessibleAgent(req, res, id))) {
+    const existing = await getAccessibleAgent(req, res, id);
+    if (!existing) {
+      return;
+    }
+    const budgetBlock = await budgets.getInvocationBlock(existing.companyId, id, {});
+    if (budgetBlock) {
+      res.status(403).json({ error: budgetBlock.reason });
       return;
     }
     const agent = await svc.resume(id);

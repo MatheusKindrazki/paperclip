@@ -724,6 +724,8 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
           pauseReason: agents.pauseReason,
           companyId: agents.companyId,
           name: agents.name,
+          budgetMonthlyCents: agents.budgetMonthlyCents,
+          spentMonthlyCents: agents.spentMonthlyCents,
         })
         .from(agents)
         .where(eq(agents.id, agentId))
@@ -807,6 +809,20 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
             scopeId: agentId,
             scopeName: agent.name,
             reason: "Agent cannot start because its budget hard-stop is still exceeded.",
+          };
+        }
+      }
+
+      // Fallback: enforce directly from agents.budgetMonthlyCents when no policy exists
+      // or when policy is out of sync (e.g., agents created before budget_policies feature,
+      // or budgets updated via PATCH without policy sync).
+      if (!agentPolicy && agent.budgetMonthlyCents > 0) {
+        if (agent.spentMonthlyCents >= agent.budgetMonthlyCents) {
+          return {
+            scopeType: "agent" as const,
+            scopeId: agentId,
+            scopeName: agent.name,
+            reason: "Agent cannot start because its budget hard-stop is exceeded.",
           };
         }
       }
