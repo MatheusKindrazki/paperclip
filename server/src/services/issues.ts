@@ -2912,7 +2912,9 @@ export function issueService(db: Db) {
       if (nextFeatureValue !== undefined && nextFeatureValue !== existing.featureValue) {
         patch.featureValue = nextFeatureValue;
         patch.featureValueSetAt = new Date();
-        patch.featureValueSetBy = actorAgentId ?? actorUserId ?? null;
+        // featureValueSetBy references agents.id (FK); actorUserId is a human
+        // user ID and would violate the constraint. Only store agent IDs.
+        patch.featureValueSetBy = actorAgentId ?? null;
       }
 
       if (issueData.status && issueData.status !== "done") {
