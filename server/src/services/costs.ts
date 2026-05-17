@@ -110,8 +110,16 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
       if (!company) throw notFound("Company not found");
 
       const conditions: ReturnType<typeof eq>[] = [eq(costEvents.companyId, companyId)];
-      if (range?.from) conditions.push(gte(costEvents.occurredAt, range.from));
-      if (range?.to) conditions.push(lte(costEvents.occurredAt, range.to));
+
+      if (range) {
+        if (range.from) conditions.push(gte(costEvents.occurredAt, range.from));
+        if (range.to) conditions.push(lte(costEvents.occurredAt, range.to));
+      } else {
+        // Default to current UTC month to match budgetMonthlyCents comparison
+        const { start, end } = currentUtcMonthWindow();
+        conditions.push(gte(costEvents.occurredAt, start));
+        conditions.push(lt(costEvents.occurredAt, end));
+      }
 
       const [{ total }] = await db
         .select({

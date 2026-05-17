@@ -504,6 +504,77 @@ describeEmbeddedPostgres("cost and finance aggregate overflow handling", () => {
     expect(byAgentModelRow?.costCents).toBe(4_000_000_000);
   });
 
+  it("summary defaults to current UTC month when no range is provided", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const now = new Date();
+    const year = now.getUTCFullYear();
+    const month = now.getUTCMonth();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      budgetMonthlyCents: 250000,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Cost Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    // Event in a previous month — should be excluded from default summary
+    await db.insert(costEvents).values({
+      companyId,
+      agentId,
+      provider: "anthropic",
+      biller: "anthropic",
+      billingType: "metered_api",
+      model: "claude-opus-4",
+      inputTokens: 1000,
+      cachedInputTokens: 0,
+      outputTokens: 500,
+      costCents: 5000,
+      occurredAt: new Date(Date.UTC(year, month - 1, 15)),
+    });
+
+    // Event in the current month — should be included
+    await db.insert(costEvents).values({
+      companyId,
+      agentId,
+      provider: "anthropic",
+      biller: "anthropic",
+      billingType: "metered_api",
+      model: "claude-opus-4",
+      inputTokens: 2000,
+      cachedInputTokens: 0,
+      outputTokens: 1000,
+      costCents: 8000,
+      occurredAt: new Date(Date.UTC(year, month, 10)),
+    });
+
+    // No range → should default to current month only
+    const summary = await costs.summary(companyId);
+    expect(summary.spendCents).toBe(8000);
+    expect(summary.budgetCents).toBe(250000);
+    expect(summary.utilizationPercent).toBe(3.2);
+
+    // Explicit range covering both months → should include both
+    const fullRange = {
+      from: new Date(Date.UTC(year, month - 1, 1)),
+      to: new Date(Date.UTC(year, month, 28)),
+    };
+    const fullSummary = await costs.summary(companyId, fullRange);
+    expect(fullSummary.spendCents).toBe(13000);
+  });
+
   it("aggregates finance event sums above int32 without raising Postgres integer overflow", async () => {
     const companyId = randomUUID();
 
