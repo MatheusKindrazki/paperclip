@@ -19,6 +19,8 @@ export {
   INBOX_MINE_ISSUE_STATUS_FILTER,
   ISSUE_PRIORITIES,
   ISSUE_FEATURE_VALUES,
+  type IssuePriority,
+  type IssueFeatureValue,
   MAX_ISSUE_REQUEST_DEPTH,
   clampIssueRequestDepth,
   ISSUE_THREAD_INTERACTION_KINDS,

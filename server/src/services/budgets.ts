@@ -813,9 +813,10 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
         }
       }
 
-      // Fallback: enforce directly from agents.budgetMonthlyCents when no policy exists
-      // or when policy is out of sync (e.g., agents created before budget_policies feature,
-      // or budgets updated via PATCH without policy sync).
+      // Fallback: enforce directly from agents.budgetMonthlyCents when no policy exists.
+      // This handles legacy agents created before budget_policies feature or edge cases
+      // in data migration. With the current PATCH implementation (lines 2307-2322 in agents.ts),
+      // policies are now always synced when budgetMonthlyCents is updated.
       if (!agentPolicy && agent.budgetMonthlyCents > 0) {
         if (agent.spentMonthlyCents >= agent.budgetMonthlyCents) {
           return {

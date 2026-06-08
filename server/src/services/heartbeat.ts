@@ -3688,7 +3688,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         const rateLimitedUntil = isProviderRateLimited(dueRunAgent.adapterType, now);
         if (rateLimitedUntil) {
           // Defer the retry — push scheduledRetryAt to the rate-limit reset window
-          await db
+          // Use a WHERE clause that checks values haven't changed since read (TOCTOU prevention)
+          const updateResult = await db
             .update(heartbeatRuns)
             .set({
               scheduledRetryAt: rateLimitedUntil,
@@ -3698,20 +3699,29 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               and(
                 eq(heartbeatRuns.id, dueRun.id),
                 eq(heartbeatRuns.status, "scheduled_retry"),
+                // Ensure scheduledRetryAt hasn't changed since we read it
+                dueRun.scheduledRetryAt
+                  ? eq(heartbeatRuns.scheduledRetryAt, dueRun.scheduledRetryAt)
+                  : isNull(heartbeatRuns.scheduledRetryAt),
+                // Ensure scheduledRetryAttempt hasn't changed
+                eq(heartbeatRuns.scheduledRetryAttempt, dueRun.scheduledRetryAttempt),
               ),
             );
-          await appendRunEvent(dueRun, await nextRunEventSeq(dueRun.id), {
-            eventType: "lifecycle",
-            stream: "system",
-            level: "info",
-            message: `Scheduled retry deferred — provider ${dueRunAgent.adapterType} is rate-limited until ${rateLimitedUntil.toISOString()}`,
-            payload: {
-              adapterType: dueRunAgent.adapterType,
-              rateLimitedUntil: rateLimitedUntil.toISOString(),
-              scheduledRetryAttempt: dueRun.scheduledRetryAttempt,
-              originalScheduledRetryAt: dueRun.scheduledRetryAt ? new Date(dueRun.scheduledRetryAt).toISOString() : null,
-            },
-          });
+          // Only log event if we actually updated a row
+          if ((updateResult).rowCount > 0) {
+            await appendRunEvent(dueRun, await nextRunEventSeq(dueRun.id), {
+              eventType: "lifecycle",
+              stream: "system",
+              level: "info",
+              message: `Scheduled retry deferred — provider ${dueRunAgent.adapterType} is rate-limited until ${rateLimitedUntil.toISOString()}`,
+              payload: {
+                adapterType: dueRunAgent.adapterType,
+                rateLimitedUntil: rateLimitedUntil.toISOString(),
+                scheduledRetryAttempt: dueRun.scheduledRetryAttempt,
+                originalScheduledRetryAt: dueRun.scheduledRetryAt ? new Date(dueRun.scheduledRetryAt).toISOString() : null,
+              },
+            });
+          }
           continue;
         }
       }
