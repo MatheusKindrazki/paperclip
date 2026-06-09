@@ -2343,10 +2343,10 @@ export function agentRoutes(
 
     if (hasOwn(patchData, "budgetMonthlyCents")) {
       const nextBudget = typeof patchData.budgetMonthlyCents === "number" ? patchData.budgetMonthlyCents : 0;
-      // Always call upsertPolicy even when amount is 0; budgets.upsertPolicy
+      // Always call upsertPolicy even when amount is 0; upsertPolicy
       // computes nextIsActive = amount > 0, so amount=0 deactivates the
       // policy. Previously the guard here left stale active policies.
-      await budgets.upsertPolicy(
+      await budgetService(db, budgetHooks).upsertPolicy(
         agent.companyId,
         {
           scopeType: "agent",
@@ -2394,7 +2394,7 @@ export function agentRoutes(
     if (!existing) {
       return;
     }
-    const budgetBlock = await budgets.getInvocationBlock(existing.companyId, id, {});
+    const budgetBlock = await budgetService(db, budgetHooks).getInvocationBlock(existing.companyId, id, {});
     if (budgetBlock) {
       res.status(403).json({ error: budgetBlock.reason });
       return;
