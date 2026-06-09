@@ -2341,23 +2341,6 @@ export function agentRoutes(
       details: summarizeAgentUpdateDetails(patchData),
     });
 
-    if (hasOwn(patchData, "budgetMonthlyCents")) {
-      const nextBudget = typeof patchData.budgetMonthlyCents === "number" ? patchData.budgetMonthlyCents : 0;
-      // Always call upsertPolicy even when amount is 0; upsertPolicy
-      // computes nextIsActive = amount > 0, so amount=0 deactivates the
-      // policy. Previously the guard here left stale active policies.
-      await budgetService(db, budgetHooks).upsertPolicy(
-        agent.companyId,
-        {
-          scopeType: "agent",
-          scopeId: agent.id,
-          amount: nextBudget,
-          windowKind: "calendar_month_utc",
-        },
-        req.actor.type === "board" ? (req.actor.userId ?? null) : null,
-      );
-    }
-
     res.json(agent);
   });
 
