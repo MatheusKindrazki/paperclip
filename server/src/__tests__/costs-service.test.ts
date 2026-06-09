@@ -166,6 +166,13 @@ beforeEach(() => {
     spentMonthlyCents: 0,
   });
   mockBudgetService.upsertPolicy.mockResolvedValue(undefined);
+  mockIssueService.getById.mockResolvedValue({
+    id: "issue-1",
+    companyId: "company-1",
+    title: "Test Issue",
+    status: "in_progress",
+    identifier: "TST-1",
+  });
 });
 
 describe("cost routes", () => {
