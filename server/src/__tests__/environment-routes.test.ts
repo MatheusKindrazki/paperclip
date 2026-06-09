@@ -49,6 +49,7 @@ vi.mock("../services/index.js", () => ({
   environmentService: () => mockEnvironmentService,
   logActivity: mockLogActivity,
   projectService: () => mockProjectService,
+  heartbeatService: () => ({ cancelBudgetScopeWork: vi.fn() }),
 }));
 
 vi.mock("../services/environment-probe.js", () => ({

@@ -34,6 +34,7 @@ vi.mock("../services/index.js", () => ({
   projectService: () => mockProjectService,
   secretService: () => mockSecretService,
   workspaceOperationService: () => mockWorkspaceOperationService,
+  heartbeatService: () => ({ cancelBudgetScopeWork: vi.fn() }),
 }));
 
 vi.mock("../services/environments.js", () => ({
