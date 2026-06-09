@@ -2052,6 +2052,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     );
   }
 
+  function clearProviderRateLimits() {
+    providerRateLimitUntil.clear();
+  }
+
   async function getAgent(agentId: string) {
     return db
       .select()
@@ -3706,9 +3710,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
                 // Ensure scheduledRetryAttempt hasn't changed
                 eq(heartbeatRuns.scheduledRetryAttempt, dueRun.scheduledRetryAttempt),
               ),
-            );
+            )
+            .returning({ id: heartbeatRuns.id });
           // Only log event if we actually updated a row
-          if ((updateResult).rowCount > 0) {
+          if (updateResult.length > 0) {
             await appendRunEvent(dueRun, await nextRunEventSeq(dueRun.id), {
               eventType: "lifecycle",
               stream: "system",
@@ -3719,6 +3724,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
                 rateLimitedUntil: rateLimitedUntil.toISOString(),
                 scheduledRetryAttempt: dueRun.scheduledRetryAttempt,
                 originalScheduledRetryAt: dueRun.scheduledRetryAt ? new Date(dueRun.scheduledRetryAt).toISOString() : null,
+                newScheduledRetryAt: rateLimitedUntil.toISOString(),
               },
             });
           }
@@ -7650,15 +7656,19 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       return { checked, enqueued, skipped };
     },
 
-    getProviderRateLimits: () => {
+    getProviderRateLimits: (now = new Date()) => {
       const result: Record<string, string> = {};
       for (const [adapterType, until] of providerRateLimitUntil) {
-        if (until.getTime() > Date.now()) {
+        if (until.getTime() > now.getTime()) {
           result[adapterType] = until.toISOString();
         }
       }
       return result;
     },
+
+    isProviderRateLimited,
+    setProviderRateLimited,
+    clearProviderRateLimits,
 
     cancelRun: (runId: string) => cancelRunInternal(runId),
 

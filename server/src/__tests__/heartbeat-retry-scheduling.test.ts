@@ -920,6 +920,7 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
       const agentId = randomUUID();
       const now = new Date("2024-06-15T10:00:00Z");
       const rateLimitUntil = new Date("2024-06-15T11:00:00Z");
+      const lastHeartbeat = new Date("2024-06-15T09:00:00Z");
 
       await seedRetryFixture({
         runId: randomUUID(),
@@ -930,6 +931,22 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
         errorFamily: "transient_upstream",
         retryNotBefore: rateLimitUntil.toISOString(),
       });
+
+      // Make agent eligible for tickTimers (needs enabled + intervalSec + overdue lastHeartbeatAt)
+      await db
+        .update(agents)
+        .set({
+          runtimeConfig: {
+            heartbeat: {
+              enabled: true,
+              intervalSec: 60,
+              wakeOnDemand: true,
+              maxConcurrentRuns: 1,
+            },
+          },
+          lastHeartbeatAt: lastHeartbeat,
+        })
+        .where(eq(agents.id, agentId));
 
       heartbeat.setProviderRateLimited("codex_local", rateLimitUntil, now);
 
@@ -943,8 +960,9 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     it("wakeup rejects timer source when provider is rate-limited", async () => {
       const companyId = randomUUID();
       const agentId = randomUUID();
-      const now = new Date("2024-06-15T10:00:00Z");
-      const rateLimitUntil = new Date("2024-06-15T11:00:00Z");
+      const now = new Date();
+      // Use a far-future date so the rate limit is active when wakeup checks with new Date()
+      const rateLimitUntil = new Date(Date.now() + 3_600_000);
 
       await seedRetryFixture({
         runId: randomUUID(),
@@ -974,8 +992,8 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     it("wakeup rejects automation source when provider is rate-limited", async () => {
       const companyId = randomUUID();
       const agentId = randomUUID();
-      const now = new Date("2024-06-15T10:00:00Z");
-      const rateLimitUntil = new Date("2024-06-15T11:00:00Z");
+      const now = new Date();
+      const rateLimitUntil = new Date(Date.now() + 3_600_000);
 
       await seedRetryFixture({
         runId: randomUUID(),
@@ -1005,8 +1023,8 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     it("wakeup allows on_demand source even when provider is rate-limited", async () => {
       const companyId = randomUUID();
       const agentId = randomUUID();
-      const now = new Date("2024-06-15T10:00:00Z");
-      const rateLimitUntil = new Date("2024-06-15T11:00:00Z");
+      const now = new Date();
+      const rateLimitUntil = new Date(Date.now() + 3_600_000);
 
       await seedRetryFixture({
         runId: randomUUID(),
@@ -1034,7 +1052,7 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
       const runId = randomUUID();
       const now = new Date("2024-06-15T10:00:00Z");
       const rateLimitUntil = new Date("2024-06-15T11:00:00Z");
-      const originalScheduledRetryAt = new Date("2024-06-15T10:30:00Z");
+      const originalScheduledRetryAt = new Date("2024-06-15T09:30:00Z");
 
       await seedRetryFixture({
         runId,
