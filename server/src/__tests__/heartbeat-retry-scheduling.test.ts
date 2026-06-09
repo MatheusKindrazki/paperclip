@@ -6,6 +6,7 @@ import {
   agentRuntimeState,
   agentWakeupRequests,
   companies,
+  companySkills,
   createDb,
   environmentLeases,
   heartbeatRunEvents,
@@ -48,6 +49,7 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
     await db.delete(agentRuntimeState);
+    await db.delete(companySkills);
     await db.delete(agents);
     await db.delete(companies);
   });
