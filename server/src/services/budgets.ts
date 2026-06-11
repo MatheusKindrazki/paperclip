@@ -724,6 +724,8 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
           pauseReason: agents.pauseReason,
           companyId: agents.companyId,
           name: agents.name,
+          budgetMonthlyCents: agents.budgetMonthlyCents,
+          spentMonthlyCents: agents.spentMonthlyCents,
         })
         .from(agents)
         .where(eq(agents.id, agentId))
@@ -807,6 +809,21 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
             scopeId: agentId,
             scopeName: agent.name,
             reason: "Agent cannot start because its budget hard-stop is still exceeded.",
+          };
+        }
+      }
+
+      // Fallback: enforce directly from agents.budgetMonthlyCents when no policy exists.
+      // This handles legacy agents created before budget_policies feature or edge cases
+      // in data migration. With the current PATCH implementation (lines 2307-2322 in agents.ts),
+      // policies are now always synced when budgetMonthlyCents is updated.
+      if (!agentPolicy && agent.budgetMonthlyCents > 0) {
+        if (agent.spentMonthlyCents >= agent.budgetMonthlyCents) {
+          return {
+            scopeType: "agent" as const,
+            scopeId: agentId,
+            scopeName: agent.name,
+            reason: "Agent cannot start because its budget hard-stop is exceeded.",
           };
         }
       }

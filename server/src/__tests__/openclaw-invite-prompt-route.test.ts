@@ -45,6 +45,7 @@ vi.mock("../services/index.js", () => ({
   deduplicateAgentName: vi.fn(),
   logActivity: mockLogActivity,
   notifyHireApproved: vi.fn(),
+  heartbeatService: () => ({ cancelBudgetScopeWork: vi.fn() }),
 }));
 
 vi.mock("../storage/index.js", () => ({

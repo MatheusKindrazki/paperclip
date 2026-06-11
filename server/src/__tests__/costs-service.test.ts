@@ -67,6 +67,8 @@ const mockCostService = vi.hoisted(() => ({
   byBiller: vi.fn().mockResolvedValue([]),
   windowSpend: vi.fn().mockResolvedValue([]),
   byProject: vi.fn().mockResolvedValue([]),
+  byIssue: vi.fn().mockResolvedValue([]),
+  forIssue: vi.fn().mockResolvedValue({ costCents: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, runCount: 0 }),
 }));
 const mockFinanceService = vi.hoisted(() => ({
   createEvent: vi.fn(),
@@ -172,6 +174,13 @@ beforeEach(() => {
     name: "Budget Agent",
     budgetMonthlyCents: 100,
     spentMonthlyCents: 0,
+  });
+  mockIssueService.getById.mockResolvedValue({
+    id: "issue-1",
+    companyId: "company-1",
+    title: "Test Issue",
+    status: "in_progress",
+    identifier: "TST-1",
   });
   mockBudgetService.upsertPolicy.mockResolvedValue(undefined);
 });
@@ -398,6 +407,59 @@ describe("cost routes", () => {
     expect(mockBudgetService.upsertPolicy).toHaveBeenCalledTimes(1);
     // logActivity must NOT run when the transaction rejected
     expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it("returns token metrics for a valid issue", async () => {
+    mockIssueService.getById.mockResolvedValueOnce({
+      id: "issue-1",
+      companyId: "company-1",
+      title: "Test Issue",
+      status: "in_progress",
+    });
+    mockCostService.forIssue.mockResolvedValueOnce({
+      costCents: 1500,
+      inputTokens: 1000,
+      cachedInputTokens: 200,
+      outputTokens: 500,
+      runCount: 3,
+    });
+
+    const app = await createApp();
+    const res = await request(app).get("/api/issues/issue-1/tokens");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      costCents: 1500,
+      runCount: 3,
+    });
+  });
+
+  it("returns 404 for non-existent issue", async () => {
+    mockIssueService.getById.mockResolvedValueOnce(null);
+
+    const app = await createApp();
+    const res = await request(app).get("/api/issues/missing-issue/tokens");
+
+    expect(res.status).toBe(404);
+    expect(mockCostService.forIssue).not.toHaveBeenCalled();
+  });
+
+  it("returns costs grouped by issue", async () => {
+    mockCostService.byIssue.mockResolvedValueOnce([
+      {
+        issueId: "issue-1",
+        issueTitle: "Feature A",
+        costCents: 2000,
+        runCount: 5,
+      },
+    ]);
+
+    const app = await createApp();
+    const res = await request(app).get("/api/companies/company-1/costs/by-issue");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0].issueTitle).toBe("Feature A");
   });
 });
 

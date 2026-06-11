@@ -2373,7 +2373,13 @@ export function agentRoutes(
   router.post("/agents/:id/resume", async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
-    if (!(await getAccessibleAgent(req, res, id))) {
+    const existing = await getAccessibleAgent(req, res, id);
+    if (!existing) {
+      return;
+    }
+    const budgetBlock = await budgetService(db, budgetHooks).getInvocationBlock(existing.companyId, id, {});
+    if (budgetBlock) {
+      res.status(403).json({ error: budgetBlock.reason });
       return;
     }
     const agent = await svc.resume(id);

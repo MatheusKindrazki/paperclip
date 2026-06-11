@@ -47,6 +47,7 @@ vi.mock("../services/index.js", () => ({
   companyService: () => mockCompanyService,
   feedbackService: () => mockFeedbackService,
   logActivity: mockLogActivity,
+  heartbeatService: () => ({ cancelBudgetScopeWork: vi.fn() }),
 }));
 
 function createCompany() {

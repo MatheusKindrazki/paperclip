@@ -2000,6 +2000,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   });
   const workspaceOperationsSvc = workspaceOperationService(db);
   const activeRunExecutions = new Set<string>();
+  /** Provider-level rate-limit registry: maps adapterType → rateLimitedUntil timestamp.
+   *  When any agent run fails with transient_upstream + retryNotBefore, all agents
+   *  sharing the same adapter type are gated until the reset window passes. */
+  const providerRateLimitUntil = new Map<string, Date>();
   const budgetHooks = {
     cancelWorkForScope: cancelBudgetScopeWork,
   };
@@ -2025,6 +2029,31 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         });
     }
     return unsafeTextProjectionPromise;
+  }
+
+  function isProviderRateLimited(adapterType: string, now = new Date()): Date | null {
+    const until = providerRateLimitUntil.get(adapterType);
+    if (!until) return null;
+    if (now.getTime() >= until.getTime()) {
+      providerRateLimitUntil.delete(adapterType);
+      return null;
+    }
+    return until;
+  }
+
+  function setProviderRateLimited(adapterType: string, until: Date, now = new Date()) {
+    if (until.getTime() <= now.getTime()) return;
+    const existing = providerRateLimitUntil.get(adapterType);
+    if (existing && existing.getTime() >= until.getTime()) return;
+    providerRateLimitUntil.set(adapterType, until);
+    logger.warn(
+      { adapterType, rateLimitedUntil: until.toISOString() },
+      "provider rate-limited — suppressing heartbeats for adapter type until reset window",
+    );
+  }
+
+  function clearProviderRateLimits() {
+    providerRateLimitUntil.clear();
   }
 
   async function getAgent(agentId: string) {
@@ -3653,6 +3682,52 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               currentAssigneeAgentId: issue.assigneeAgentId,
             },
           });
+          continue;
+        }
+      }
+
+      // Skip promotion if the agent's provider is currently rate-limited
+      const dueRunAgent = await getAgent(dueRun.agentId);
+      if (dueRunAgent) {
+        const rateLimitedUntil = isProviderRateLimited(dueRunAgent.adapterType, now);
+        if (rateLimitedUntil) {
+          // Defer the retry — push scheduledRetryAt to the rate-limit reset window
+          // Use a WHERE clause that checks values haven't changed since read (TOCTOU prevention)
+          const updateResult = await db
+            .update(heartbeatRuns)
+            .set({
+              scheduledRetryAt: rateLimitedUntil,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(heartbeatRuns.id, dueRun.id),
+                eq(heartbeatRuns.status, "scheduled_retry"),
+                // Ensure scheduledRetryAt hasn't changed since we read it
+                dueRun.scheduledRetryAt
+                  ? eq(heartbeatRuns.scheduledRetryAt, dueRun.scheduledRetryAt)
+                  : isNull(heartbeatRuns.scheduledRetryAt),
+                // Ensure scheduledRetryAttempt hasn't changed
+                eq(heartbeatRuns.scheduledRetryAttempt, dueRun.scheduledRetryAttempt),
+              ),
+            )
+            .returning({ id: heartbeatRuns.id });
+          // Only log event if we actually updated a row
+          if (updateResult.length > 0) {
+            await appendRunEvent(dueRun, await nextRunEventSeq(dueRun.id), {
+              eventType: "lifecycle",
+              stream: "system",
+              level: "info",
+              message: `Scheduled retry deferred — provider ${dueRunAgent.adapterType} is rate-limited until ${rateLimitedUntil.toISOString()}`,
+              payload: {
+                adapterType: dueRunAgent.adapterType,
+                rateLimitedUntil: rateLimitedUntil.toISOString(),
+                scheduledRetryAttempt: dueRun.scheduledRetryAttempt,
+                originalScheduledRetryAt: dueRun.scheduledRetryAt ? new Date(dueRun.scheduledRetryAt).toISOString() : null,
+                newScheduledRetryAt: rateLimitedUntil.toISOString(),
+              },
+            });
+          }
           continue;
         }
       }
@@ -5739,6 +5814,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           }
         }
         if (outcome === "failed" && readTransientRecoveryContractFromRun(livenessRun)) {
+          const transientContract = readTransientRecoveryContractFromRun(livenessRun);
+          if (transientContract?.retryNotBefore) {
+            setProviderRateLimited(agent.adapterType, transientContract.retryNotBefore);
+          }
           await scheduleBoundedRetryForRun(livenessRun, agent);
         }
         await finalizeIssueCommentPolicy(livenessRun, agent);
@@ -6405,6 +6484,15 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         finishedAt: new Date(),
       });
     };
+
+    // Skip timer/automation wakes when the provider is rate-limited (daily quota exhaustion)
+    if (source === "timer" || source === "automation") {
+      const rateLimitedUntil = isProviderRateLimited(agent.adapterType);
+      if (rateLimitedUntil) {
+        await writeSkippedRequest("provider.rate_limited");
+        return null;
+      }
+    }
 
     let projectId = readNonEmptyString(enrichedContextSnapshot.projectId);
     if (!projectId && issueId) {
@@ -7538,6 +7626,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         const policy = parseHeartbeatPolicy(agent);
         if (!policy.enabled || policy.intervalSec <= 0) continue;
 
+        const rateLimitedUntil = isProviderRateLimited(agent.adapterType, now);
+        if (rateLimitedUntil) {
+          skipped += 1;
+          continue;
+        }
+
         checked += 1;
         const baseline = new Date(agent.lastHeartbeatAt ?? agent.createdAt).getTime();
         const elapsedMs = now.getTime() - baseline;
@@ -7561,6 +7655,20 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       return { checked, enqueued, skipped };
     },
+
+    getProviderRateLimits: (now = new Date()) => {
+      const result: Record<string, string> = {};
+      for (const [adapterType, until] of providerRateLimitUntil) {
+        if (until.getTime() > now.getTime()) {
+          result[adapterType] = until.toISOString();
+        }
+      }
+      return result;
+    },
+
+    isProviderRateLimited,
+    setProviderRateLimited,
+    clearProviderRateLimits,
 
     cancelRun: (runId: string) => cancelRunInternal(runId),
 

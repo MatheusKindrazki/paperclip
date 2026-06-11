@@ -6,6 +6,7 @@ import {
   agentRuntimeState,
   agentWakeupRequests,
   companies,
+  companySkills,
   createDb,
   environmentLeases,
   heartbeatRunEvents,
@@ -48,6 +49,7 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
     await db.delete(agentRuntimeState);
+    await db.delete(companySkills);
     await db.delete(agents);
     await db.delete(companies);
   });
@@ -833,5 +835,306 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     expect((wakeupRequest?.payload as Record<string, unknown> | null)?.transientRetryNotBefore).toBe(
       retryNotBefore.toISOString(),
     );
+  });
+
+  // B1: Test provider rate-limit functions
+  describe("provider rate-limit backoff", () => {
+    afterEach(() => {
+      heartbeat.clearProviderRateLimits();
+    });
+
+    it("isProviderRateLimited returns null when no limit is set", async () => {
+      const result = heartbeat.isProviderRateLimited("codex_local", new Date());
+      expect(result).toBeNull();
+    });
+
+    it("isProviderRateLimited returns null when limit has expired", async () => {
+      const now = new Date("2024-06-15T10:00:00Z");
+      const past = new Date("2024-06-15T09:00:00Z");
+
+      heartbeat.setProviderRateLimited("codex_local", past, now);
+
+      const result = heartbeat.isProviderRateLimited("codex_local", now);
+      expect(result).toBeNull();
+    });
+
+    it("isProviderRateLimited returns limit when active", async () => {
+      const now = new Date("2024-06-15T10:00:00Z");
+      const future = new Date("2024-06-15T11:00:00Z");
+
+      heartbeat.setProviderRateLimited("codex_local", future, now);
+
+      const result = heartbeat.isProviderRateLimited("codex_local", now);
+      expect(result).not.toBeNull();
+      expect(result?.getTime()).toBe(future.getTime());
+    });
+
+    it("isProviderRateLimited auto-expires expired limits", async () => {
+      const now = new Date("2024-06-15T10:00:00Z");
+      const future = new Date("2024-06-15T11:00:00Z");
+      const afterExpiry = new Date("2024-06-15T12:00:00Z");
+
+      heartbeat.setProviderRateLimited("codex_local", future, now);
+
+      // Before expiry, should return the limit
+      const beforeExpiry = heartbeat.isProviderRateLimited("codex_local", now);
+      expect(beforeExpiry).not.toBeNull();
+
+      // After expiry, should return null and auto-cleanup
+      const afterExpiryResult = heartbeat.isProviderRateLimited("codex_local", afterExpiry);
+      expect(afterExpiryResult).toBeNull();
+
+      // Verify the limit was removed from the map
+      const finalCheck = heartbeat.isProviderRateLimited("codex_local", afterExpiry);
+      expect(finalCheck).toBeNull();
+    });
+
+    it("setProviderRateLimited keeps max window when called multiple times", async () => {
+      const now = new Date("2024-06-15T10:00:00Z");
+      const later1 = new Date("2024-06-15T11:00:00Z");
+      const later2 = new Date("2024-06-15T12:00:00Z");
+      const earlier = new Date("2024-06-15T10:30:00Z");
+
+      heartbeat.setProviderRateLimited("codex_local", later1, now);
+      heartbeat.setProviderRateLimited("codex_local", earlier, now);
+      heartbeat.setProviderRateLimited("codex_local", later2, now);
+
+      const result = heartbeat.isProviderRateLimited("codex_local", now);
+      expect(result).not.toBeNull();
+      expect(result?.getTime()).toBe(later2.getTime());
+    });
+
+    it("setProviderRateLimited is no-op for past dates", async () => {
+      const now = new Date("2024-06-15T10:00:00Z");
+      const past = new Date("2024-06-15T09:00:00Z");
+      const future = new Date("2024-06-15T11:00:00Z");
+
+      heartbeat.setProviderRateLimited("codex_local", future, now);
+      heartbeat.setProviderRateLimited("codex_local", past, now);
+
+      const result = heartbeat.isProviderRateLimited("codex_local", now);
+      expect(result).not.toBeNull();
+      expect(result?.getTime()).toBe(future.getTime());
+    });
+
+    it("tickTimers skips rate-limited agents and increments skipped count", async () => {
+      const companyId = randomUUID();
+      const agentId = randomUUID();
+      const now = new Date("2024-06-15T10:00:00Z");
+      const rateLimitUntil = new Date("2024-06-15T11:00:00Z");
+      const lastHeartbeat = new Date("2024-06-15T09:00:00Z");
+
+      await seedRetryFixture({
+        runId: randomUUID(),
+        companyId,
+        agentId,
+        now,
+        errorCode: "rate_limit_exceeded",
+        errorFamily: "transient_upstream",
+        retryNotBefore: rateLimitUntil.toISOString(),
+      });
+
+      // Make agent eligible for tickTimers (needs enabled + intervalSec + overdue lastHeartbeatAt)
+      await db
+        .update(agents)
+        .set({
+          runtimeConfig: {
+            heartbeat: {
+              enabled: true,
+              intervalSec: 60,
+              wakeOnDemand: true,
+              maxConcurrentRuns: 1,
+            },
+          },
+          lastHeartbeatAt: lastHeartbeat,
+        })
+        .where(eq(agents.id, agentId));
+
+      heartbeat.setProviderRateLimited("codex_local", rateLimitUntil, now);
+
+      const result = await heartbeat.tickTimers(now);
+
+      expect(result.skipped).toBe(1);
+      expect(result.checked).toBe(0);
+      expect(result.enqueued).toBe(0);
+    });
+
+    it("wakeup rejects timer source when provider is rate-limited", async () => {
+      const companyId = randomUUID();
+      const agentId = randomUUID();
+      const now = new Date();
+      // Use a far-future date so the rate limit is active when wakeup checks with new Date()
+      const rateLimitUntil = new Date(Date.now() + 3_600_000);
+
+      await seedRetryFixture({
+        runId: randomUUID(),
+        companyId,
+        agentId,
+        now,
+        errorCode: "rate_limit_exceeded",
+        errorFamily: "transient_upstream",
+        retryNotBefore: rateLimitUntil.toISOString(),
+      });
+
+      heartbeat.setProviderRateLimited("codex_local", rateLimitUntil, now);
+
+      const result = await heartbeat.wakeup(agentId, {
+        source: "timer",
+        triggerDetail: "system",
+        reason: "periodic_check",
+        payload: {},
+        contextSnapshot: {},
+        requestedByActorType: "system",
+        requestedByActorId: "heartbeat",
+      });
+
+      expect(result).toBeNull();
+    });
+
+    it("wakeup rejects automation source when provider is rate-limited", async () => {
+      const companyId = randomUUID();
+      const agentId = randomUUID();
+      const now = new Date();
+      const rateLimitUntil = new Date(Date.now() + 3_600_000);
+
+      await seedRetryFixture({
+        runId: randomUUID(),
+        companyId,
+        agentId,
+        now,
+        errorCode: "rate_limit_exceeded",
+        errorFamily: "transient_upstream",
+        retryNotBefore: rateLimitUntil.toISOString(),
+      });
+
+      heartbeat.setProviderRateLimited("codex_local", rateLimitUntil, now);
+
+      const result = await heartbeat.wakeup(agentId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: "automation_trigger",
+        payload: {},
+        contextSnapshot: {},
+        requestedByActorType: "system",
+        requestedByActorId: "heartbeat",
+      });
+
+      expect(result).toBeNull();
+    });
+
+    it("wakeup allows on_demand source even when provider is rate-limited", async () => {
+      const companyId = randomUUID();
+      const agentId = randomUUID();
+      const now = new Date();
+      const rateLimitUntil = new Date(Date.now() + 3_600_000);
+
+      await seedRetryFixture({
+        runId: randomUUID(),
+        companyId,
+        agentId,
+        now,
+        errorCode: "rate_limit_exceeded",
+        errorFamily: "transient_upstream",
+        retryNotBefore: rateLimitUntil.toISOString(),
+      });
+
+      heartbeat.setProviderRateLimited("codex_local", rateLimitUntil, now);
+
+      const result = await heartbeat.wakeup(agentId, {
+        source: "on_demand",
+        triggerDetail: "manual",
+      });
+
+      expect(result).not.toBeNull();
+    });
+
+    it("promoteDueScheduledRetries defers retry when provider is rate-limited", async () => {
+      const companyId = randomUUID();
+      const agentId = randomUUID();
+      const runId = randomUUID();
+      const now = new Date("2024-06-15T10:00:00Z");
+      const rateLimitUntil = new Date("2024-06-15T11:00:00Z");
+      const originalScheduledRetryAt = new Date("2024-06-15T09:30:00Z");
+
+      await seedRetryFixture({
+        runId,
+        companyId,
+        agentId,
+        now,
+        errorCode: "rate_limit_exceeded",
+        errorFamily: "transient_upstream",
+        retryNotBefore: originalScheduledRetryAt.toISOString(),
+        scheduledRetryAttempt: 1,
+      });
+
+      // Transition the run to scheduled_retry with a due scheduledRetryAt
+      // (seedRetryFixture creates runs as "failed"; promoteDueScheduledRetries
+      // only picks up "scheduled_retry" runs whose scheduledRetryAt <= now)
+      await db
+        .update(heartbeatRuns)
+        .set({
+          status: "scheduled_retry",
+          scheduledRetryAt: originalScheduledRetryAt,
+          updatedAt: now,
+        })
+        .where(eq(heartbeatRuns.id, runId));
+
+      heartbeat.setProviderRateLimited("codex_local", rateLimitUntil, now);
+
+      await heartbeat.promoteDueScheduledRetries(now);
+
+      const deferredRun = await db
+        .select({ scheduledRetryAt: heartbeatRuns.scheduledRetryAt })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, runId))
+        .then((rows) => rows[0] ?? null);
+
+      expect(deferredRun).not.toBeNull();
+      expect(deferredRun?.scheduledRetryAt?.getTime()).toBe(rateLimitUntil.getTime());
+
+      const lifecycleEvent = await db
+        .select({
+          message: heartbeatRunEvents.message,
+          payload: heartbeatRunEvents.payload,
+        })
+        .from(heartbeatRunEvents)
+        .where(eq(heartbeatRunEvents.runId, runId))
+        .then((rows) => rows[0] ?? null);
+
+      expect(lifecycleEvent).not.toBeNull();
+      expect(lifecycleEvent?.message).toContain("deferred");
+      expect(lifecycleEvent?.payload).toMatchObject({
+        originalScheduledRetryAt: originalScheduledRetryAt.toISOString(),
+        newScheduledRetryAt: rateLimitUntil.toISOString(),
+      });
+    });
+
+    it("getProviderRateLimits returns active rate limits", async () => {
+      const now = new Date("2024-06-15T10:00:00Z");
+      const future1 = new Date("2024-06-15T11:00:00Z");
+      const future2 = new Date("2024-06-15T12:00:00Z");
+
+      heartbeat.setProviderRateLimited("codex_local", future1, now);
+      heartbeat.setProviderRateLimited("claude_local", future2, now);
+
+      const limits = heartbeat.getProviderRateLimits(now);
+
+      expect(limits["codex_local"]).toBe(future1.toISOString());
+      expect(limits["claude_local"]).toBe(future2.toISOString());
+    });
+
+    it("getProviderRateLimits excludes expired limits", async () => {
+      const now = new Date("2024-06-15T10:00:00Z");
+      const future = new Date("2024-06-15T11:00:00Z");
+      const past = new Date("2024-06-15T09:00:00Z");
+
+      heartbeat.setProviderRateLimited("codex_local", future, now);
+      heartbeat.setProviderRateLimited("claude_local", past, now);
+
+      const limits = heartbeat.getProviderRateLimits(now);
+
+      expect(limits["codex_local"]).toBe(future.toISOString());
+      expect(limits["claude_local"]).toBeUndefined();
+    });
   });
 });

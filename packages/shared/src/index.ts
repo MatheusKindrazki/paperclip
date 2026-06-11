@@ -121,6 +121,7 @@ export {
   type AgentIconName,
   type IssueStatus,
   type IssuePriority,
+  type IssueFeatureValue,
   type IssueThreadInteractionKind,
   type IssueThreadInteractionStatus,
   type IssueThreadInteractionContinuationPolicy,
