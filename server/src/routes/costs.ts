@@ -23,6 +23,31 @@ import { fetchAllQuotaWindows } from "../services/quota-windows.js";
 import { badRequest } from "../errors.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 
+// Aliases that select the current calendar month (UTC). The company/agent
+// budgets are monthly, so summary-style endpoints must default to this window
+// rather than lifetime spend (MOKA-4620).
+const CURRENT_MONTH_PERIOD_ALIASES = new Set(["month", "current_month", "mtd"]);
+
+function startOfUtcMonth(year: number, monthIndex: number) {
+  return new Date(Date.UTC(year, monthIndex, 1, 0, 0, 0, 0));
+}
+
+// Calendar-month range with an inclusive end (last ms of the month) so it
+// composes with the gte(from)+lte(to) filters used by the cost queries.
+export function currentMonthRange(now = new Date()): { from: Date; to: Date } {
+  const year = now.getUTCFullYear();
+  const month = now.getUTCMonth();
+  return {
+    from: startOfUtcMonth(year, month),
+    to: new Date(startOfUtcMonth(year, month + 1).getTime() - 1),
+  };
+}
+
+function singleParam(value: unknown): string | undefined {
+  const raw = Array.isArray(value) ? value[0] : value;
+  return raw == null || raw === "" ? undefined : String(raw);
+}
+
 export function parseCostDateRange(query: Record<string, unknown>) {
   const fromRaw = query.from as string | undefined;
   const toRaw = query.to as string | undefined;
@@ -30,7 +55,35 @@ export function parseCostDateRange(query: Record<string, unknown>) {
   const to = toRaw ? new Date(toRaw) : undefined;
   if (from && isNaN(from.getTime())) throw badRequest("invalid 'from' date");
   if (to && isNaN(to.getTime())) throw badRequest("invalid 'to' date");
-  return (from || to) ? { from, to } : undefined;
+  // Explicit from/to wins over the period/month shorthands.
+  if (from || to) return { from, to };
+
+  const month = singleParam(query.month);
+  if (month) {
+    const match = /^(\d{4})-(\d{2})$/.exec(month);
+    if (!match) throw badRequest("invalid 'month' value, expected YYYY-MM");
+    const year = Number(match[1]);
+    const monthIndex = Number(match[2]) - 1;
+    if (monthIndex < 0 || monthIndex > 11) {
+      throw badRequest("invalid 'month' value, month must be 01-12");
+    }
+    return {
+      from: startOfUtcMonth(year, monthIndex),
+      to: new Date(startOfUtcMonth(year, monthIndex + 1).getTime() - 1),
+    };
+  }
+
+  const period = singleParam(query.period);
+  if (period) {
+    if (!CURRENT_MONTH_PERIOD_ALIASES.has(period)) {
+      throw badRequest(
+        `invalid 'period' value '${period}', supported: ${[...CURRENT_MONTH_PERIOD_ALIASES].join(", ")}`,
+      );
+    }
+    return currentMonthRange();
+  }
+
+  return undefined;
 }
 
 export function parseCostLimit(query: Record<string, unknown>) {
@@ -123,7 +176,9 @@ export function costRoutes(
   router.get("/companies/:companyId/costs/summary", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
-    const range = parseCostDateRange(req.query);
+    // The budget compared against is monthly, so default to the current
+    // calendar month instead of lifetime spend (MOKA-4620).
+    const range = parseCostDateRange(req.query) ?? currentMonthRange();
     const summary = await costs.summary(companyId, range);
     res.json(summary);
   });
@@ -131,7 +186,7 @@ export function costRoutes(
   router.get("/companies/:companyId/costs/by-agent", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
-    const range = parseCostDateRange(req.query);
+    const range = parseCostDateRange(req.query) ?? currentMonthRange();
     const rows = await costs.byAgent(companyId, range);
     res.json(rows);
   });
