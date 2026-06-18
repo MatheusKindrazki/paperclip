@@ -211,8 +211,16 @@ describe("cost routes", () => {
   it.each(["month", "current_month", "mtd"])(
     "resolves period=%s to the current calendar month (UTC)",
     async (period) => {
-      const { parseCostDateRange, currentMonthRange } = await loadCostParsers();
-      expect(parseCostDateRange({ period })).toEqual(currentMonthRange());
+      // Fix the system time to prevent flakiness if the test crosses a UTC month boundary
+      const fixedDate = new Date("2026-06-15T12:00:00.000Z");
+      vi.useFakeTimers();
+      vi.setSystemTime(fixedDate);
+      try {
+        const { parseCostDateRange, currentMonthRange } = await loadCostParsers();
+        expect(parseCostDateRange({ period })).toEqual(currentMonthRange());
+      } finally {
+        vi.useRealTimers();
+      }
     },
   );
 
@@ -247,13 +255,21 @@ describe("cost routes", () => {
   });
 
   it("defaults /costs/summary to the current month (not lifetime) when no range is given", async () => {
-    const { currentMonthRange } = await loadCostParsers();
-    const app = await createApp();
-    const res = await request(app).get("/api/companies/company-1/costs/summary");
-    expect(res.status).toBe(200);
-    // Regression for MOKA-4620: the route must hand the service a monthly
-    // window so lifetime spend is never divided by the monthly budget.
-    expect(mockCostService.summary).toHaveBeenCalledWith("company-1", currentMonthRange());
+    // Fix the system time to prevent flakiness if the test crosses a UTC month boundary
+    const fixedDate = new Date("2026-06-15T12:00:00.000Z");
+    vi.useFakeTimers();
+    vi.setSystemTime(fixedDate);
+    try {
+      const { currentMonthRange } = await loadCostParsers();
+      const app = await createApp();
+      const res = await request(app).get("/api/companies/company-1/costs/summary");
+      expect(res.status).toBe(200);
+      // Regression for MOKA-4620: the route must hand the service a monthly
+      // window so lifetime spend is never divided by the monthly budget.
+      expect(mockCostService.summary).toHaveBeenCalledWith("company-1", currentMonthRange());
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("returns 400 from /costs/summary for an unknown period instead of silently using lifetime", async () => {
