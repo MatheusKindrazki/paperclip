@@ -35,6 +35,7 @@ import type {
 } from "@paperclipai/shared";
 import { clampIssueRequestDepth, extractAgentMentionIds, extractProjectMentionIds, isUuidLike } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
+import { logger } from "../middleware/logger.js";
 import {
   defaultIssueExecutionWorkspaceSettingsForProject,
   gateProjectExecutionWorkspacePolicy,
@@ -51,6 +52,7 @@ import {
   issueTreeControlService,
   type ActiveIssueTreePauseHoldGate,
 } from "./issue-tree-control.js";
+import { isForeignKeyViolation } from "../utils/db-error-utils.js";
 
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
@@ -84,6 +86,8 @@ function applyStatusSideEffects(
   }
   return patch;
 }
+
+const ISSUE_COMMENT_RUN_ID_FK_CONSTRAINT = "issue_comments_created_by_run_id_heartbeat_runs_id_fk";
 
 function readStringFromRecord(record: unknown, key: string) {
   if (!record || typeof record !== "object") return null;
@@ -3538,17 +3542,68 @@ export function issueService(db: Db) {
         enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
       };
       const redactedBody = redactCurrentUserText(body, currentUserRedactionOptions);
-      const [comment] = await db
-        .insert(issueComments)
-        .values({
-          companyId: issue.companyId,
-          issueId,
-          authorAgentId: actor.agentId ?? null,
-          authorUserId: actor.userId ?? null,
-          createdByRunId: actor.runId ?? null,
-          body: redactedBody,
-        })
-        .returning();
+
+      // issue_comments.created_by_run_id has an FK to heartbeat_runs.id.
+      // Coalesce unknown run ids to null so comment creation can never fail
+      // due to a stale X-Paperclip-Run-Id header.
+      let safeRunId = actor.runId ?? null;
+      if (safeRunId) {
+        const existingRun = await db
+          .select({ id: heartbeatRuns.id, companyId: heartbeatRuns.companyId })
+          .from(heartbeatRuns)
+          .where(eq(heartbeatRuns.id, safeRunId))
+          .limit(1);
+        if (existingRun.length === 0) {
+          logger.warn(
+            { runId: safeRunId, issueId },
+            "addComment: run_id not found in heartbeat_runs, coalescing to null",
+          );
+          safeRunId = null;
+        } else if (existingRun[0].companyId !== issue.companyId) {
+          logger.warn(
+            { runId: safeRunId, issueId, runCompanyId: existingRun[0].companyId, issueCompanyId: issue.companyId },
+            "addComment: run_id belongs to different company, coalescing to null",
+          );
+          safeRunId = null;
+        }
+      }
+
+      let comment;
+      try {
+        [comment] = await db
+          .insert(issueComments)
+          .values({
+            companyId: issue.companyId,
+            issueId,
+            authorAgentId: actor.agentId ?? null,
+            authorUserId: actor.userId ?? null,
+            createdByRunId: safeRunId,
+            body: redactedBody,
+          })
+          .returning();
+      } catch (err) {
+        // Race condition: run deleted between pre-check and insert.
+        // Only retry if this is a foreign key constraint violation for the run_id.
+        if (safeRunId && isForeignKeyViolation(err, ISSUE_COMMENT_RUN_ID_FK_CONSTRAINT)) {
+          logger.warn(
+            { err, runId: safeRunId, issueId },
+            "addComment: insert failed due to FK violation, retrying with created_by_run_id=null",
+          );
+          [comment] = await db
+            .insert(issueComments)
+            .values({
+              companyId: issue.companyId,
+              issueId,
+              authorAgentId: actor.agentId ?? null,
+              authorUserId: actor.userId ?? null,
+              createdByRunId: null,
+              body: redactedBody,
+            })
+            .returning();
+        } else {
+          throw err;
+        }
+      }
 
       // Update issue's updatedAt so comment activity is reflected in recency sorting
       await db
