@@ -10,6 +10,7 @@ import { sanitizeRecord } from "../redaction.js";
 import { logger } from "../middleware/logger.js";
 import type { PluginEventBus } from "./plugin-event-bus.js";
 import { instanceSettingsService } from "./instance-settings.js";
+import { isForeignKeyViolation } from "../utils/db-error-utils.js";
 
 const PLUGIN_EVENT_SET: ReadonlySet<string> = new Set(PLUGIN_EVENT_TYPES);
 const ACTIVITY_ACTION_TO_PLUGIN_EVENT: Readonly<Record<string, PluginEventType>> = {
@@ -28,13 +29,6 @@ const ACTIVITY_ACTION_TO_PLUGIN_EVENT: Readonly<Record<string, PluginEventType>>
 };
 
 const ACTIVITY_LOG_RUN_ID_FK_CONSTRAINT = "activity_log_run_id_heartbeat_runs_id_fk";
-
-function isForeignKeyViolation(err: unknown, constraint: string): boolean {
-  if (!err || typeof err !== "object") return false;
-  const maybe = err as { code?: string; constraint?: string; constraint_name?: string };
-  const constraintName = maybe.constraint ?? maybe.constraint_name;
-  return maybe.code === "23503" && constraintName === constraint;
-}
 
 let _pluginEventBus: PluginEventBus | null = null;
 

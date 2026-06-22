@@ -52,6 +52,7 @@ import {
   issueTreeControlService,
   type ActiveIssueTreePauseHoldGate,
 } from "./issue-tree-control.js";
+import { isForeignKeyViolation } from "../utils/db-error-utils.js";
 
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
@@ -86,16 +87,7 @@ function applyStatusSideEffects(
   return patch;
 }
 
-/**
- * Detect if a Postgres error is a foreign-key constraint violation
- * on the issue_comments_created_by_run_id_heartbeat_runs_id_fk constraint.
- */
-function isIssueCommentRunIdFkViolation(error: unknown): boolean {
-  if (typeof error !== "object" || error === null) return false;
-  const err = error as { code?: string; constraint?: string; constraint_name?: string };
-  const constraint = err.constraint ?? err.constraint_name;
-  return err.code === "23503" && constraint === "issue_comments_created_by_run_id_heartbeat_runs_id_fk";
-}
+const ISSUE_COMMENT_RUN_ID_FK_CONSTRAINT = "issue_comments_created_by_run_id_heartbeat_runs_id_fk";
 
 function readStringFromRecord(record: unknown, key: string) {
   if (!record || typeof record !== "object") return null;
@@ -3592,7 +3584,7 @@ export function issueService(db: Db) {
       } catch (err) {
         // Race condition: run deleted between pre-check and insert.
         // Only retry if this is a foreign key constraint violation for the run_id.
-        if (safeRunId && isIssueCommentRunIdFkViolation(err)) {
+        if (safeRunId && isForeignKeyViolation(err, ISSUE_COMMENT_RUN_ID_FK_CONSTRAINT)) {
           logger.warn(
             { err, runId: safeRunId, issueId },
             "addComment: insert failed due to FK violation, retrying with created_by_run_id=null",
