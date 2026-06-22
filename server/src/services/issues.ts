@@ -86,6 +86,17 @@ function applyStatusSideEffects(
   return patch;
 }
 
+/**
+ * Detect if a Postgres error is a foreign-key constraint violation
+ * on the issue_comments_created_by_run_id_heartbeat_runs_id_fk constraint.
+ */
+function isIssueCommentRunIdFkViolation(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const err = error as { code?: string; constraint?: string; constraint_name?: string };
+  const constraint = err.constraint ?? err.constraint_name;
+  return err.code === "23503" && constraint === "issue_comments_created_by_run_id_heartbeat_runs_id_fk";
+}
+
 function readStringFromRecord(record: unknown, key: string) {
   if (!record || typeof record !== "object") return null;
   const value = (record as Record<string, unknown>)[key];
@@ -3546,7 +3557,7 @@ export function issueService(db: Db) {
       let safeRunId = actor.runId ?? null;
       if (safeRunId) {
         const existingRun = await db
-          .select({ id: heartbeatRuns.id })
+          .select({ id: heartbeatRuns.id, companyId: heartbeatRuns.companyId })
           .from(heartbeatRuns)
           .where(eq(heartbeatRuns.id, safeRunId))
           .limit(1);
@@ -3554,6 +3565,12 @@ export function issueService(db: Db) {
           logger.warn(
             { runId: safeRunId, issueId },
             "addComment: run_id not found in heartbeat_runs, coalescing to null",
+          );
+          safeRunId = null;
+        } else if (existingRun[0].companyId !== issue.companyId) {
+          logger.warn(
+            { runId: safeRunId, issueId, runCompanyId: existingRun[0].companyId, issueCompanyId: issue.companyId },
+            "addComment: run_id belongs to different company, coalescing to null",
           );
           safeRunId = null;
         }
@@ -3574,10 +3591,11 @@ export function issueService(db: Db) {
           .returning();
       } catch (err) {
         // Race condition: run deleted between pre-check and insert.
-        if (safeRunId) {
+        // Only retry if this is a foreign key constraint violation for the run_id.
+        if (safeRunId && isIssueCommentRunIdFkViolation(err)) {
           logger.warn(
             { err, runId: safeRunId, issueId },
-            "addComment: insert failed, retrying with created_by_run_id=null",
+            "addComment: insert failed due to FK violation, retrying with created_by_run_id=null",
           );
           [comment] = await db
             .insert(issueComments)

@@ -88,7 +88,7 @@ export async function logActivity(db: Db, input: LogActivityInput) {
   let safeRunId = input.runId ?? null;
   if (safeRunId) {
     const existingRun = await db
-      .select({ id: heartbeatRuns.id })
+      .select({ id: heartbeatRuns.id, companyId: heartbeatRuns.companyId })
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, safeRunId))
       .limit(1);
@@ -96,6 +96,12 @@ export async function logActivity(db: Db, input: LogActivityInput) {
       logger.warn(
         { runId: safeRunId, action: input.action },
         "logActivity: run_id not found in heartbeat_runs, coalescing to null",
+      );
+      safeRunId = null;
+    } else if (existingRun[0].companyId !== input.companyId) {
+      logger.warn(
+        { runId: safeRunId, action: input.action, runCompanyId: existingRun[0].companyId, inputCompanyId: input.companyId },
+        "logActivity: run_id belongs to different company, coalescing to null",
       );
       safeRunId = null;
     }
@@ -119,7 +125,7 @@ export async function logActivity(db: Db, input: LogActivityInput) {
     if (safeRunId && isForeignKeyViolation(err, ACTIVITY_LOG_RUN_ID_FK_CONSTRAINT)) {
       logger.warn(
         { err, runId: safeRunId, action: input.action },
-        "logActivity: insert failed, retrying with run_id=null",
+        "logActivity: insert failed due to FK violation, retrying with run_id=null",
       );
       await db.insert(activityLog).values({
         companyId: input.companyId,
