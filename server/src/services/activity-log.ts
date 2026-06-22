@@ -27,6 +27,15 @@ const ACTIVITY_ACTION_TO_PLUGIN_EVENT: Readonly<Record<string, PluginEventType>>
   budget_incident_resolved: "budget.incident.resolved",
 };
 
+const ACTIVITY_LOG_RUN_ID_FK_CONSTRAINT = "activity_log_run_id_heartbeat_runs_id_fk";
+
+function isForeignKeyViolation(err: unknown, constraint: string): boolean {
+  if (!err || typeof err !== "object") return false;
+  const maybe = err as { code?: string; constraint?: string; constraint_name?: string };
+  const constraintName = maybe.constraint ?? maybe.constraint_name;
+  return maybe.code === "23503" && constraintName === constraint;
+}
+
 let _pluginEventBus: PluginEventBus | null = null;
 
 /** Wire the plugin event bus so domain events are forwarded to plugins. */
@@ -107,7 +116,7 @@ export async function logActivity(db: Db, input: LogActivityInput) {
   } catch (err) {
     // Race condition: run may have been deleted between pre-check and insert.
     // Retry once with run_id = null so the audit row still lands.
-    if (safeRunId) {
+    if (safeRunId && isForeignKeyViolation(err, ACTIVITY_LOG_RUN_ID_FK_CONSTRAINT)) {
       logger.warn(
         { err, runId: safeRunId, action: input.action },
         "logActivity: insert failed, retrying with run_id=null",
