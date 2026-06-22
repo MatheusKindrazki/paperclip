@@ -1825,26 +1825,33 @@ export function issueRoutes(
       referenceSummary,
     );
 
-    await logActivity(db, {
-      companyId,
-      actorType: actor.actorType,
-      actorId: actor.actorId,
-      agentId: actor.agentId,
-      runId: actor.runId,
-      action: "issue.created",
-      entityType: "issue",
-      entityId: issue.id,
-      details: {
-        title: issue.title,
-        identifier: issue.identifier,
-        ...(Array.isArray(req.body.blockedByIssueIds) ? { blockedByIssueIds: req.body.blockedByIssueIds } : {}),
-        ...summarizeIssueReferenceActivityDetails({
-          addedReferencedIssues: referenceDiff.addedReferencedIssues.map(summarizeIssueRelationForActivity),
-          removedReferencedIssues: referenceDiff.removedReferencedIssues.map(summarizeIssueRelationForActivity),
-          currentReferencedIssues: referenceDiff.currentReferencedIssues.map(summarizeIssueRelationForActivity),
-        }),
-      },
-    });
+    // The issue row is already committed. An auxiliary audit write must never
+    // turn a successful create into a 500 (which also leaks an orphan issue), so
+    // log activity best-effort. logActivity itself coalesces unknown run ids.
+    try {
+      await logActivity(db, {
+        companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: "issue.created",
+        entityType: "issue",
+        entityId: issue.id,
+        details: {
+          title: issue.title,
+          identifier: issue.identifier,
+          ...(Array.isArray(req.body.blockedByIssueIds) ? { blockedByIssueIds: req.body.blockedByIssueIds } : {}),
+          ...summarizeIssueReferenceActivityDetails({
+            addedReferencedIssues: referenceDiff.addedReferencedIssues.map(summarizeIssueRelationForActivity),
+            removedReferencedIssues: referenceDiff.removedReferencedIssues.map(summarizeIssueRelationForActivity),
+            currentReferencedIssues: referenceDiff.currentReferencedIssues.map(summarizeIssueRelationForActivity),
+          }),
+        },
+      });
+    } catch (err) {
+      logger.warn({ err, issueId: issue.id, companyId }, "failed to log issue.created activity (non-fatal)");
+    }
 
     void queueIssueAssignmentWakeup({
       heartbeat,

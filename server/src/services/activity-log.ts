@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { activityLog } from "@paperclipai/db";
+import { activityLog, heartbeatRuns } from "@paperclipai/db";
 import { PLUGIN_EVENT_TYPES, type PluginEventType } from "@paperclipai/shared";
 import type { PluginEvent } from "@paperclipai/plugin-sdk";
 import { publishLiveEvent } from "./live-events.js";
@@ -70,17 +71,63 @@ export async function logActivity(db: Db, input: LogActivityInput) {
   const redactedDetails = sanitizedDetails
     ? redactCurrentUserValue(sanitizedDetails, currentUserRedactionOptions)
     : null;
-  await db.insert(activityLog).values({
-    companyId: input.companyId,
-    actorType: input.actorType,
-    actorId: input.actorId,
-    action: input.action,
-    entityType: input.entityType,
-    entityId: input.entityId,
-    agentId: input.agentId ?? null,
-    runId: input.runId ?? null,
-    details: redactedDetails,
-  });
+
+  // activity_log.run_id has an FK to heartbeat_runs.id. Callers forward the raw
+  // X-Paperclip-Run-Id header, which may be a UUID that is not a real heartbeat
+  // run (e.g. ad-hoc API clients). Coalesce unknown run ids to null so an
+  // auxiliary audit write can never violate the FK and fail the primary mutation.
+  let safeRunId = input.runId ?? null;
+  if (safeRunId) {
+    const existingRun = await db
+      .select({ id: heartbeatRuns.id })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, safeRunId))
+      .limit(1);
+    if (existingRun.length === 0) {
+      logger.warn(
+        { runId: safeRunId, action: input.action },
+        "logActivity: run_id not found in heartbeat_runs, coalescing to null",
+      );
+      safeRunId = null;
+    }
+  }
+
+  try {
+    await db.insert(activityLog).values({
+      companyId: input.companyId,
+      actorType: input.actorType,
+      actorId: input.actorId,
+      action: input.action,
+      entityType: input.entityType,
+      entityId: input.entityId,
+      agentId: input.agentId ?? null,
+      runId: safeRunId,
+      details: redactedDetails,
+    });
+  } catch (err) {
+    // Race condition: run may have been deleted between pre-check and insert.
+    // Retry once with run_id = null so the audit row still lands.
+    if (safeRunId) {
+      logger.warn(
+        { err, runId: safeRunId, action: input.action },
+        "logActivity: insert failed, retrying with run_id=null",
+      );
+      await db.insert(activityLog).values({
+        companyId: input.companyId,
+        actorType: input.actorType,
+        actorId: input.actorId,
+        action: input.action,
+        entityType: input.entityType,
+        entityId: input.entityId,
+        agentId: input.agentId ?? null,
+        runId: null,
+        details: redactedDetails,
+      });
+      safeRunId = null;
+    } else {
+      throw err;
+    }
+  }
 
   publishLiveEvent({
     companyId: input.companyId,
@@ -92,7 +139,7 @@ export async function logActivity(db: Db, input: LogActivityInput) {
       entityType: input.entityType,
       entityId: input.entityId,
       agentId: input.agentId ?? null,
-      runId: input.runId ?? null,
+      runId: safeRunId,
       details: redactedDetails,
     },
   });
@@ -111,7 +158,7 @@ export async function logActivity(db: Db, input: LogActivityInput) {
       payload: {
         ...redactedDetails,
         agentId: input.agentId ?? null,
-        runId: input.runId ?? null,
+        runId: safeRunId,
       },
     };
     publishPluginDomainEvent(event);
