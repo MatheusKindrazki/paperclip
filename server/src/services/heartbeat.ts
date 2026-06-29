@@ -6535,6 +6535,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
 
     // Skip timer wakes when the agent has zero active assignments — prevents no-op heartbeat loops
+    // Note: assignment, on_demand, and automation sources bypass this check (intentional — these are contextual/system-triggered wakes)
     if (source === "timer") {
       const [{ count: assignmentCount }] = await db
         .select({ count: sql<number>`count(*)` })
