@@ -6534,6 +6534,24 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       return null;
     }
 
+    // Skip timer wakes when the agent has zero active assignments — prevents no-op heartbeat loops
+    if (source === "timer") {
+      const [{ count: assignmentCount }] = await db
+        .select({ count: sql<number>`count(*)` })
+        .from(issues)
+        .where(
+          and(
+            eq(issues.assigneeAgentId, agentId),
+            eq(issues.companyId, agent.companyId),
+            inArray(issues.status, ["todo", "in_progress", "blocked", "in_review"]),
+          ),
+        );
+      if (Number(assignmentCount ?? 0) === 0) {
+        await writeSkippedRequest("heartbeat.no_active_assignments");
+        return null;
+      }
+    }
+
     if (issueId) {
       const activePauseHold = await treeControlSvc.getActivePauseHoldGate(agent.companyId, issueId);
       if (activePauseHold) {
