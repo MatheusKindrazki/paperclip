@@ -34,6 +34,8 @@ import {
   instanceSettingsService,
   reconcilePersistedRuntimeServicesOnStartup,
   routineService,
+  runWorkspacePreflight,
+  setLastWorkspacePreflightReport,
 } from "./services/index.js";
 import { createFeedbackTraceShareClientFromConfig } from "./services/feedback-share-client.js";
 import { buildRuntimeApiCandidateUrls, choosePrimaryRuntimeApiUrl } from "./runtime-api.js";
@@ -667,8 +669,43 @@ export async function startServer(): Promise<StartedServer> {
     .catch((err) => {
       logger.error({ err }, "startup reconciliation of persisted runtime services failed");
     });
-  
-  if (config.heartbeatSchedulerEnabled) {
+
+  // MOKA-5031: workspace-validation preflight. Before enabling the agent fleet
+  // after a restart, verify every active execution-workspace cwd and every
+  // non-paused agent's adapterConfig.cwd that requires a git workspace actually
+  // resolves to a git worktree. Fail closed: if any path fails, the fleet is
+  // held back and the failure is surfaced on /health so the SRE monitor catches
+  // it (prevents the MOKA-5012 regression where ~35% of runs hit
+  // workspace_validation_failed against a re-cloned repo).
+  const workspacePreflight = await runWorkspacePreflight(db as any).catch((err) => {
+    // A crash in the preflight itself must NOT become a new fleet-disable vector.
+    logger.error({ err }, "workspace preflight crashed; allowing fleet enablement");
+    return {
+      ok: true,
+      checkedAt: new Date().toISOString(),
+      workspaceCount: 0,
+      agentCount: 0,
+      offenders: [],
+      queryError: err instanceof Error ? err.message : String(err),
+    };
+  });
+  setLastWorkspacePreflightReport(workspacePreflight);
+  const fleetEnablementAllowed = config.heartbeatSchedulerEnabled && workspacePreflight.ok;
+  if (config.heartbeatSchedulerEnabled && !workspacePreflight.ok) {
+    logger.error(
+      {
+        offenders: workspacePreflight.offenders,
+        offenderCount: workspacePreflight.offenders.length,
+        workspaceCount: workspacePreflight.workspaceCount,
+        agentCount: workspacePreflight.agentCount,
+      },
+      "startup workspace preflight FAILED — agent fleet is held back (fail-closed). "
+        + "Fix the offending cwds (see offenders) and restart the orchestrator. "
+        + "See MOKA-5031 / MOKA-5012.",
+    );
+  }
+
+  if (fleetEnablementAllowed) {
     const heartbeat = heartbeatService(db as any, { pluginWorkerManager });
     const routines = routineService(db as any, { pluginWorkerManager });
   
