@@ -7,6 +7,7 @@ import type { DeploymentExposure, DeploymentMode } from "@paperclipai/shared";
 import { readPersistedDevServerStatus, toDevServerHealthStatus } from "../dev-server-status.js";
 import { logger } from "../middleware/logger.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
+import { getLastWorkspacePreflightReport } from "../services/workspace-preflight.js";
 import { serverVersion } from "../version.js";
 
 function shouldExposeFullHealthDetails(
@@ -74,6 +75,35 @@ export function healthRoutes(
       return;
     }
 
+    // MOKA-5031: surface the startup workspace preflight. When the fleet is
+    // held back because an active workspace/agent cwd is not a git worktree,
+    // report 503 degraded so the SRE monitor catches a fleet-down condition
+    // (MOKA-5009: nothing caught the 5-day standstill). Offending paths are only
+    // exposed in full-details mode to avoid leaking them to unauthenticated
+    // callers; the status code + offenderCount always reflect the condition.
+    const fleetPreflight = getLastWorkspacePreflightReport();
+    if (fleetPreflight && !fleetPreflight.ok) {
+      res.status(503).json({
+        status: "degraded",
+        version: serverVersion,
+        deploymentMode: opts.deploymentMode,
+        fleetPreflight: {
+          ok: false,
+          checkedAt: fleetPreflight.checkedAt,
+          offenderCount: fleetPreflight.offenders.length,
+          ...(exposeFullDetails
+            ? {
+                workspaceCount: fleetPreflight.workspaceCount,
+                agentCount: fleetPreflight.agentCount,
+                offenders: fleetPreflight.offenders,
+              }
+            : {}),
+          ...(fleetPreflight.queryError ? { queryError: fleetPreflight.queryError } : {}),
+        },
+      });
+      return;
+    }
+
     let bootstrapStatus: "ready" | "bootstrap_pending" = "ready";
     let bootstrapInviteActive = false;
     if (opts.deploymentMode === "authenticated") {
@@ -126,6 +156,7 @@ export function healthRoutes(
         bootstrapStatus,
         bootstrapInviteActive,
         ...(devServer ? { devServer } : {}),
+        ...(fleetPreflight ? { fleetPreflight: { ok: true, checkedAt: fleetPreflight.checkedAt } } : {}),
       });
       return;
     }
@@ -142,6 +173,7 @@ export function healthRoutes(
         companyDeletionEnabled: opts.companyDeletionEnabled,
       },
       ...(devServer ? { devServer } : {}),
+      ...(fleetPreflight ? { fleetPreflight: { ok: true, checkedAt: fleetPreflight.checkedAt } } : {}),
     });
   });
 

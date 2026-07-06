@@ -156,6 +156,17 @@ vi.mock("../services/index.js", () => ({
     })),
   })),
   reconcilePersistedRuntimeServicesOnStartup: vi.fn(async () => ({ reconciled: 0 })),
+  // MOKA-5031: workspace-validation preflight runs on the same boot path as
+  // reconcilePersistedRuntimeServicesOnStartup. Resolve ok:true so the mocked
+  // startServer() lets fleet enablement proceed without exercising real FS/git checks.
+  runWorkspacePreflight: vi.fn(async () => ({
+    ok: true,
+    checkedAt: "1970-01-01T00:00:00.000Z",
+    workspaceCount: 0,
+    agentCount: 0,
+    offenders: [],
+  })),
+  setLastWorkspacePreflightReport: vi.fn(),
   routineService: vi.fn(() => ({
     tickScheduledTriggers: vi.fn(async () => ({ triggered: 0 })),
   })),
