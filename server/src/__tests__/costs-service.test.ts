@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { createDb, companies, agents, costEvents, financeEvents, projects } from "@paperclipai/db";
 import { costService } from "../services/costs.ts";
 import { financeService } from "../services/finance.ts";
+import { currentMonthRange } from "../routes/costs.ts";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -143,8 +144,8 @@ async function createAppWithActor(actor: any) {
 }
 
 async function loadCostParsers() {
-  const { parseCostDateRange, parseCostLimit } = await import("../routes/costs.js");
-  return { parseCostDateRange, parseCostLimit };
+  const { parseCostDateRange, parseCostLimit, currentMonthRange } = await import("../routes/costs.js");
+  return { parseCostDateRange, parseCostLimit, currentMonthRange };
 }
 
 beforeEach(() => {
@@ -205,6 +206,79 @@ describe("cost routes", () => {
   it("returns 400 for an invalid 'to' date string", async () => {
     const { parseCostDateRange } = await loadCostParsers();
     expect(() => parseCostDateRange({ to: "banana" })).toThrow(/invalid 'to' date/i);
+  });
+
+  it.each(["month", "current_month", "mtd"])(
+    "resolves period=%s to the current calendar month (UTC)",
+    async (period) => {
+      // Fix the system time to prevent flakiness if the test crosses a UTC month boundary
+      const fixedDate = new Date("2026-06-15T12:00:00.000Z");
+      vi.useFakeTimers();
+      vi.setSystemTime(fixedDate);
+      try {
+        const { parseCostDateRange, currentMonthRange } = await loadCostParsers();
+        expect(parseCostDateRange({ period })).toEqual(currentMonthRange());
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("resolves month=YYYY-MM to that calendar month (UTC)", async () => {
+    const { parseCostDateRange } = await loadCostParsers();
+    expect(parseCostDateRange({ month: "2026-06" })).toEqual({
+      from: new Date("2026-06-01T00:00:00.000Z"),
+      to: new Date("2026-06-30T23:59:59.999Z"),
+    });
+  });
+
+  it("lets explicit from/to win over period/month shorthands", async () => {
+    const { parseCostDateRange } = await loadCostParsers();
+    expect(
+      parseCostDateRange({
+        from: "2026-01-01T00:00:00.000Z",
+        period: "month",
+        month: "2026-06",
+      }),
+    ).toEqual({ from: new Date("2026-01-01T00:00:00.000Z"), to: undefined });
+  });
+
+  it("rejects an unknown 'period' value with 400 (no silent fallthrough)", async () => {
+    const { parseCostDateRange } = await loadCostParsers();
+    expect(() => parseCostDateRange({ period: "year" })).toThrow(/invalid 'period'/i);
+  });
+
+  it("rejects a malformed 'month' value with 400", async () => {
+    const { parseCostDateRange } = await loadCostParsers();
+    expect(() => parseCostDateRange({ month: "2026-6" })).toThrow(/invalid 'month'/i);
+    expect(() => parseCostDateRange({ month: "2026-13" })).toThrow(/invalid 'month'/i);
+  });
+
+  it("defaults /costs/summary to the current month (not lifetime) when no range is given", async () => {
+    // Fix the system time to prevent flakiness if the test crosses a UTC month boundary
+    const fixedDate = new Date("2026-06-15T12:00:00.000Z");
+    vi.useFakeTimers();
+    vi.setSystemTime(fixedDate);
+    try {
+      const { currentMonthRange } = await loadCostParsers();
+      const app = await createApp();
+      const res = await request(app).get("/api/companies/company-1/costs/summary");
+      expect(res.status).toBe(200);
+      // Regression for MOKA-4620: the route must hand the service a monthly
+      // window so lifetime spend is never divided by the monthly budget.
+      expect(mockCostService.summary).toHaveBeenCalledWith("company-1", currentMonthRange());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("returns 400 from /costs/summary for an unknown period instead of silently using lifetime", async () => {
+    const app = await createApp();
+    const res = await request(app)
+      .get("/api/companies/company-1/costs/summary")
+      .query({ period: "all_time" });
+    expect(res.status).toBe(400);
+    expect(mockCostService.summary).not.toHaveBeenCalled();
   });
 
   it("returns finance summary rows for valid requests", async () => {
@@ -564,6 +638,78 @@ describeEmbeddedPostgres("cost and finance aggregate overflow handling", () => {
     expect(byAgentRow?.inputTokens).toBe(4_000_000_000);
     expect(byProjectRow?.costCents).toBe(4_000_000_000);
     expect(byAgentModelRow?.costCents).toBe(4_000_000_000);
+  });
+
+  it("scopes summary utilization to the current month so lifetime spend is not divided by the monthly budget (MOKA-4620)", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+
+    // Monthly budget of $40.00. Prior-month spend ($60.00) dwarfs the budget;
+    // current-month spend ($26.00) is comfortably within it.
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+      budgetMonthlyCents: 4000,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Cost Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    const monthRange = currentMonthRange();
+    const priorMonth = new Date(monthRange.from.getTime() - 5 * 24 * 60 * 60 * 1000);
+    const currentMonth = new Date(monthRange.from.getTime() + 60 * 60 * 1000);
+
+    await db.insert(costEvents).values([
+      {
+        companyId,
+        agentId,
+        provider: "openai",
+        biller: "openai",
+        billingType: "metered_api",
+        model: "gpt-5",
+        inputTokens: 0,
+        cachedInputTokens: 0,
+        outputTokens: 0,
+        costCents: 6000,
+        occurredAt: priorMonth,
+      },
+      {
+        companyId,
+        agentId,
+        provider: "openai",
+        biller: "openai",
+        billingType: "metered_api",
+        model: "gpt-5",
+        inputTokens: 0,
+        cachedInputTokens: 0,
+        outputTokens: 0,
+        costCents: 2600,
+        occurredAt: currentMonth,
+      },
+    ]);
+
+    // Lifetime (no range) sums both months and produces a meaningless
+    // over-budget reading — this is the bug the default range guards against.
+    const lifetime = await costs.summary(companyId);
+    expect(lifetime.spendCents).toBe(8600);
+    expect(lifetime.utilizationPercent).toBeGreaterThan(100);
+
+    // The route now passes the current-month window: utilization reflects MTD
+    // ($26.00 / $40.00 = 65%), never lifetime spend over a monthly budget.
+    const monthly = await costs.summary(companyId, monthRange);
+    expect(monthly.spendCents).toBe(2600);
+    expect(monthly.budgetCents).toBe(4000);
+    expect(monthly.utilizationPercent).toBe(65);
   });
 
   it("aggregates finance event sums above int32 without raising Postgres integer overflow", async () => {

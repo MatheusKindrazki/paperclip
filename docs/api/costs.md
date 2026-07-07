@@ -29,6 +29,16 @@ GET /api/companies/{companyId}/costs/summary
 
 Returns total spend, budget, and utilization for the current month.
 
+Spend is scoped to a monthly window by default because `utilizationPercent`
+is computed against the **monthly** budget. Override the window with:
+
+- `?from=<ISO>&to=<ISO>` — explicit range (takes precedence)
+- `?month=YYYY-MM` — a specific calendar month (UTC)
+- `?period=month` (aliases: `current_month`, `mtd`) — the current calendar month (UTC)
+
+Unrecognized `period` or malformed `month` values return `400` rather than
+silently falling back to lifetime spend.
+
 ## Costs by Agent
 
 ```
