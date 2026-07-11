@@ -47,6 +47,7 @@ init_stats() {
 OK=0
 SKIPPED=0
 FAILED=0
+DRIFT=0
 TAGS=""
 EOF
 }
@@ -89,6 +90,14 @@ append_tag() {
 show_help() {
     sed -n '/^# Usage/,/^#$/p' "$0" | sed 's/^# //g' | sed 's/^#//g'
     exit 0
+}
+
+# Display error message for unknown flags
+show_flag_error() {
+    local flag="$1"
+    echo "Error: Unknown option: $flag" >&2
+    echo "Use --help for usage information" >&2
+    exit 1
 }
 
 # Parse command line arguments
@@ -194,16 +203,17 @@ process_agent() {
 
     # Check if already tagged
     local existing_class
-    existing_class=$(echo "$current_metadata" | jq -r '.costClass // empty')
+    existing_class=$(echo "$current_metadata" | jq -r 'if type == "object" then .costClass // empty else empty end' 2>/dev/null)
 
     if [ "$existing_class" = "$cost_class" ]; then
-        echo "SKIP: $agent_name (${agent_id}) already has costClass=$cost_class"
+        echo "ok: $agent_name already has costClass=$cost_class"
         update_stats "SKIPPED" 0
         return 0
     fi
 
     if [ -n "$existing_class" ]; then
-        echo "WARN: $agent_name (${agent_id}) has costClass=$existing_class, should be $cost_class"
+        echo "DRIFT: $agent_name has costClass=$existing_class, should be $cost_class"
+        update_stats "DRIFT" 0
         update_stats "FAILED" 0
         return 1
     fi
@@ -278,9 +288,13 @@ main() {
     echo "Processing agents..."
     echo ""
 
-    echo "$agents_json" | jq -r '.[] | "\(.id)|\(.name)|\(.metadata // {})"' | while IFS='|' read -r agent_id agent_name metadata; do
+    echo "$agents_json" | jq -r '.[] | "\(.id)|\(.name)|\(.metadata)"' | while IFS='|' read -r agent_id agent_name metadata; do
+        # Handle null or string metadata
+        if [ "$metadata" = "null" ] || [ "$metadata" = "" ]; then
+            metadata="{}"
+        fi
         process_agent "$agent_id" "$agent_name" "$metadata" "$MODE"
-    done
+    done || true
 
     # Display final statistics
     echo ""
@@ -296,8 +310,14 @@ main() {
 
     if [ "$MODE" = "verify" ]; then
         echo ""
-        echo "Cost class assignments verified:"
-        echo "$TAGS" | tr ' ' '\n' | column -t -s ':'
+        echo "Verification Summary:"
+        echo "Total agents verified: $agent_count"
+        echo "Drift detected: $DRIFT"
+        if [ "$DRIFT" -eq 0 ]; then
+            echo "✓ No drift detected - all agents correctly tagged"
+        else
+            echo "⚠ Agents with incorrect cost classes: $DRIFT"
+        fi
     fi
 
     if [ "$FAILED" -gt 0 ]; then
