@@ -3,12 +3,9 @@ import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   agents,
-  agentRuntimeState,
   agentWakeupRequests,
   companies,
-  companySkills,
   createDb,
-  environmentLeases,
   heartbeatRunEvents,
   heartbeatRuns,
   issues,
@@ -43,15 +40,19 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
   }, 20_000);
 
   afterEach(async () => {
-    await db.delete(heartbeatRunEvents);
-    await db.delete(environmentLeases);
-    await db.delete(issues);
-    await db.delete(heartbeatRuns);
-    await db.delete(agentWakeupRequests);
-    await db.delete(agentRuntimeState);
-    await db.delete(companySkills);
-    await db.delete(agents);
-    await db.delete(companies);
+    // `wakeup` queues a run and executes it via a detached `void executeRun(...)`
+    // (see services/heartbeat.ts), whose run-prep path calls
+    // companySkills.listRuntimeSkillEntries -> ensureBundledSkills and
+    // asynchronously inserts bundled company_skills for the run's company. That
+    // fire-and-forget insert can land between the company_skills delete and the
+    // companies delete under ordered per-table DELETE teardown and trip the
+    // company_skills -> companies FK (NO ACTION). Tear down with a single
+    // TRUNCATE ... CASCADE — matching the sibling heartbeat suites — which is
+    // ordering-independent and atomically removes company plus every FK child
+    // (company_skills included; all fixture tables reference companies), so a
+    // late insert finds no parent and is rejected silently. This removes the
+    // teardown FK race that kept the canary channel dark.
+    await db.execute(sql.raw(`TRUNCATE TABLE "companies" CASCADE`));
   });
 
   afterAll(async () => {
