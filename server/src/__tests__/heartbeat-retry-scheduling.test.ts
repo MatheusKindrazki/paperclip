@@ -3,12 +3,9 @@ import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   agents,
-  agentRuntimeState,
   agentWakeupRequests,
   companies,
-  companySkills,
   createDb,
-  environmentLeases,
   heartbeatRunEvents,
   heartbeatRuns,
   issues,
@@ -43,15 +40,29 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
   }, 20_000);
 
   afterEach(async () => {
-    await db.delete(heartbeatRunEvents);
-    await db.delete(environmentLeases);
-    await db.delete(issues);
-    await db.delete(heartbeatRuns);
-    await db.delete(agentWakeupRequests);
-    await db.delete(agentRuntimeState);
-    await db.delete(companySkills);
-    await db.delete(agents);
-    await db.delete(companies);
+    // Drain detached execution first. `claimQueuedRuns` fires
+    // `void executeRun(runId)` (fire-and-forget) whose lifecycle writes
+    // (heartbeat_runs, agents, issues...) outlive the awaited `wakeup()` and
+    // would (a) trip the `company_skills_company_id_companies_id_fk` NO ACTION
+    // constraint under the old per-table delete chain, and (b) deadlock the
+    // atomic CASCADE truncate below if a run is still queued/running. Poll
+    // until no runs are mid-execution, then truncate. Mirrors
+    // heartbeat-active-run-output-watchdog.test.ts.
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const activeRuns = await db
+        .select({ id: heartbeatRuns.id })
+        .from(heartbeatRuns)
+        .where(sql`${heartbeatRuns.status} in ('queued', 'running')`);
+      if (activeRuns.length === 0) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    // Atomic CASCADE truncation: reaches every child table holding a
+    // `company_id` FK (heartbeat_runs, agents, issues, agent_runtime_state,
+    // agent_wakeup_requests, heartbeat_run_events, company_skills,
+    // environment_leases) in one statement — eliminating the inter-statement
+    // race window of the old delete chain that kept the fork-master canary
+    // release channel dark since ~2026-05-04.
+    await db.execute(sql.raw(`TRUNCATE TABLE "companies" CASCADE`));
   });
 
   afterAll(async () => {
@@ -723,11 +734,10 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
         .then((rows) => rows[0] ?? null);
       expect((wakeupRequest?.payload as Record<string, unknown> | null)?.codexTransientFallbackMode).toBe(expectedMode);
 
-      await db.delete(heartbeatRunEvents);
-      await db.delete(heartbeatRuns);
-      await db.delete(agentWakeupRequests);
-      await db.delete(agents);
-      await db.delete(companies);
+      // Atomic CASCADE truncation (see afterEach): the prior per-iteration
+      // chain deleted `companies` without first clearing `company_skills` —
+      // the second trigger of the same FK race.
+      await db.execute(sql.raw(`TRUNCATE TABLE "companies" CASCADE`));
     }
   });
 
