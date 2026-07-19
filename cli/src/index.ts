@@ -8,6 +8,7 @@ import { heartbeatRun } from "./commands/heartbeat-run.js";
 import { runCommand } from "./commands/run.js";
 import { bootstrapCeoInvite } from "./commands/auth-bootstrap-ceo.js";
 import { dbBackupCommand } from "./commands/db-backup.js";
+import { registerEnvLabCommands } from "./commands/env-lab.js";
 import { registerContextCommands } from "./commands/client/context.js";
 import { registerCompanyCommands } from "./commands/client/company.js";
 import { registerIssueCommands } from "./commands/client/issue.js";
@@ -15,7 +16,15 @@ import { registerAgentCommands } from "./commands/client/agent.js";
 import { registerApprovalCommands } from "./commands/client/approval.js";
 import { registerActivityCommands } from "./commands/client/activity.js";
 import { registerDashboardCommands } from "./commands/client/dashboard.js";
+import { registerRoutineCommands } from "./commands/routines.js";
+import { registerFeedbackCommands } from "./commands/client/feedback.js";
 import { applyDataDirOverride, type DataDirOptionLike } from "./config/data-dir.js";
+import { loadPaperclipEnvFile } from "./config/env.js";
+import { initTelemetryFromConfigFile, flushTelemetry } from "./telemetry.js";
+import { registerWorktreeCommands } from "./commands/worktree.js";
+import { registerPluginCommands } from "./commands/client/plugin.js";
+import { registerClientAuthCommands } from "./commands/client/auth.js";
+import { cliVersion } from "./version.js";
 
 const program = new Command();
 const DATA_DIR_OPTION_HELP =
@@ -24,7 +33,7 @@ const DATA_DIR_OPTION_HELP =
 program
   .name("paperclipai")
   .description("Paperclip CLI — setup, diagnose, and configure your instance")
-  .version("0.2.7");
+  .version(cliVersion);
 
 program.hook("preAction", (_thisCommand, actionCommand) => {
   const options = actionCommand.optsWithGlobals() as DataDirOptionLike;
@@ -33,6 +42,8 @@ program.hook("preAction", (_thisCommand, actionCommand) => {
     hasConfigOption: optionNames.has("config"),
     hasContextOption: optionNames.has("context"),
   });
+  loadPaperclipEnvFile(options.config);
+  initTelemetryFromConfigFile(options.config);
 });
 
 program
@@ -40,7 +51,8 @@ program
   .description("Interactive first-run setup wizard")
   .option("-c, --config <path>", "Path to config file")
   .option("-d, --data-dir <path>", DATA_DIR_OPTION_HELP)
-  .option("-y, --yes", "Accept defaults (quickstart + start immediately)", false)
+  .option("--bind <mode>", "Quickstart reachability preset (loopback, lan, tailnet)")
+  .option("-y, --yes", "Accept quickstart defaults (trusted local loopback unless --bind is set) and start immediately", false)
   .option("--run", "Start Paperclip immediately after saving config", false)
   .action(onboard);
 
@@ -98,6 +110,7 @@ program
   .option("-c, --config <path>", "Path to config file")
   .option("-d, --data-dir <path>", DATA_DIR_OPTION_HELP)
   .option("-i, --instance <id>", "Local instance id (default: default)")
+  .option("--bind <mode>", "On first run, use onboarding reachability preset (loopback, lan, tailnet)")
   .option("--repair", "Attempt automatic repairs during doctor", true)
   .option("--no-repair", "Disable automatic repairs during doctor")
   .action(runCommand);
@@ -132,6 +145,11 @@ registerAgentCommands(program);
 registerApprovalCommands(program);
 registerActivityCommands(program);
 registerDashboardCommands(program);
+registerRoutineCommands(program);
+registerFeedbackCommands(program);
+registerWorktreeCommands(program);
+registerEnvLabCommands(program);
+registerPluginCommands(program);
 
 const auth = program.command("auth").description("Authentication and bootstrap utilities");
 
@@ -145,7 +163,22 @@ auth
   .option("--base-url <url>", "Public base URL used to print invite link")
   .action(bootstrapCeoInvite);
 
-program.parseAsync().catch((err) => {
-  console.error(err instanceof Error ? err.message : String(err));
-  process.exit(1);
-});
+registerClientAuthCommands(auth);
+
+async function main(): Promise<void> {
+  let failed = false;
+  try {
+    await program.parseAsync();
+  } catch (err) {
+    failed = true;
+    console.error(err instanceof Error ? err.message : String(err));
+  } finally {
+    await flushTelemetry();
+  }
+
+  if (failed) {
+    process.exit(1);
+  }
+}
+
+void main();

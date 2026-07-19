@@ -1,11 +1,62 @@
+import { randomUUID } from "node:crypto";
+import { eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { activityLog } from "@paperclipai/db";
+import { activityLog, heartbeatRuns } from "@paperclipai/db";
+import { PLUGIN_EVENT_TYPES, type PluginEventType } from "@paperclipai/shared";
+import type { PluginEvent } from "@paperclipai/plugin-sdk";
 import { publishLiveEvent } from "./live-events.js";
+import { redactCurrentUserValue } from "../log-redaction.js";
 import { sanitizeRecord } from "../redaction.js";
+import { logger } from "../middleware/logger.js";
+import type { PluginEventBus } from "./plugin-event-bus.js";
+import { instanceSettingsService } from "./instance-settings.js";
+import { isForeignKeyViolation } from "../utils/db-error-utils.js";
+
+const PLUGIN_EVENT_SET: ReadonlySet<string> = new Set(PLUGIN_EVENT_TYPES);
+const ACTIVITY_ACTION_TO_PLUGIN_EVENT: Readonly<Record<string, PluginEventType>> = {
+  issue_comment_added: "issue.comment.created",
+  issue_comment_created: "issue.comment.created",
+  issue_document_created: "issue.document.created",
+  issue_document_updated: "issue.document.updated",
+  issue_document_deleted: "issue.document.deleted",
+  issue_blockers_updated: "issue.relations.updated",
+  approval_approved: "approval.decided",
+  approval_rejected: "approval.decided",
+  approval_revision_requested: "approval.decided",
+  budget_soft_threshold_crossed: "budget.incident.opened",
+  budget_hard_threshold_crossed: "budget.incident.opened",
+  budget_incident_resolved: "budget.incident.resolved",
+};
+
+const ACTIVITY_LOG_RUN_ID_FK_CONSTRAINT = "activity_log_run_id_heartbeat_runs_id_fk";
+
+let _pluginEventBus: PluginEventBus | null = null;
+
+/** Wire the plugin event bus so domain events are forwarded to plugins. */
+export function setPluginEventBus(bus: PluginEventBus): void {
+  if (_pluginEventBus) {
+    logger.warn("setPluginEventBus called more than once, replacing existing bus");
+  }
+  _pluginEventBus = bus;
+}
+
+function eventTypeForActivityAction(action: string): PluginEventType | null {
+  if (PLUGIN_EVENT_SET.has(action)) return action as PluginEventType;
+  return ACTIVITY_ACTION_TO_PLUGIN_EVENT[action.replaceAll(".", "_")] ?? null;
+}
+
+export function publishPluginDomainEvent(event: PluginEvent): void {
+  if (!_pluginEventBus) return;
+  void _pluginEventBus.emit(event).then(({ errors }) => {
+    for (const { pluginId, error } of errors) {
+      logger.warn({ pluginId, eventType: event.eventType, err: error }, "plugin event handler failed");
+    }
+  }).catch(() => {});
+}
 
 export interface LogActivityInput {
   companyId: string;
-  actorType: "agent" | "user" | "system";
+  actorType: "agent" | "user" | "system" | "plugin";
   actorId: string;
   action: string;
   entityType: string;
@@ -16,18 +67,76 @@ export interface LogActivityInput {
 }
 
 export async function logActivity(db: Db, input: LogActivityInput) {
+  const currentUserRedactionOptions = {
+    enabled: (await instanceSettingsService(db).getGeneral()).censorUsernameInLogs,
+  };
   const sanitizedDetails = input.details ? sanitizeRecord(input.details) : null;
-  await db.insert(activityLog).values({
-    companyId: input.companyId,
-    actorType: input.actorType,
-    actorId: input.actorId,
-    action: input.action,
-    entityType: input.entityType,
-    entityId: input.entityId,
-    agentId: input.agentId ?? null,
-    runId: input.runId ?? null,
-    details: sanitizedDetails,
-  });
+  const redactedDetails = sanitizedDetails
+    ? redactCurrentUserValue(sanitizedDetails, currentUserRedactionOptions)
+    : null;
+
+  // activity_log.run_id has an FK to heartbeat_runs.id. Callers forward the raw
+  // X-Paperclip-Run-Id header, which may be a UUID that is not a real heartbeat
+  // run (e.g. ad-hoc API clients). Coalesce unknown run ids to null so an
+  // auxiliary audit write can never violate the FK and fail the primary mutation.
+  let safeRunId = input.runId ?? null;
+  if (safeRunId) {
+    const existingRun = await db
+      .select({ id: heartbeatRuns.id, companyId: heartbeatRuns.companyId })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, safeRunId))
+      .limit(1);
+    if (existingRun.length === 0) {
+      logger.warn(
+        { runId: safeRunId, action: input.action },
+        "logActivity: run_id not found in heartbeat_runs, coalescing to null",
+      );
+      safeRunId = null;
+    } else if (existingRun[0].companyId !== input.companyId) {
+      logger.warn(
+        { runId: safeRunId, action: input.action, runCompanyId: existingRun[0].companyId, inputCompanyId: input.companyId },
+        "logActivity: run_id belongs to different company, coalescing to null",
+      );
+      safeRunId = null;
+    }
+  }
+
+  try {
+    await db.insert(activityLog).values({
+      companyId: input.companyId,
+      actorType: input.actorType,
+      actorId: input.actorId,
+      action: input.action,
+      entityType: input.entityType,
+      entityId: input.entityId,
+      agentId: input.agentId ?? null,
+      runId: safeRunId,
+      details: redactedDetails,
+    });
+  } catch (err) {
+    // Race condition: run may have been deleted between pre-check and insert.
+    // Retry once with run_id = null so the audit row still lands.
+    if (safeRunId && isForeignKeyViolation(err, ACTIVITY_LOG_RUN_ID_FK_CONSTRAINT)) {
+      logger.warn(
+        { err, runId: safeRunId, action: input.action },
+        "logActivity: insert failed due to FK violation, retrying with run_id=null",
+      );
+      await db.insert(activityLog).values({
+        companyId: input.companyId,
+        actorType: input.actorType,
+        actorId: input.actorId,
+        action: input.action,
+        entityType: input.entityType,
+        entityId: input.entityId,
+        agentId: input.agentId ?? null,
+        runId: null,
+        details: redactedDetails,
+      });
+      safeRunId = null;
+    } else {
+      throw err;
+    }
+  }
 
   publishLiveEvent({
     companyId: input.companyId,
@@ -39,8 +148,28 @@ export async function logActivity(db: Db, input: LogActivityInput) {
       entityType: input.entityType,
       entityId: input.entityId,
       agentId: input.agentId ?? null,
-      runId: input.runId ?? null,
-      details: sanitizedDetails,
+      runId: safeRunId,
+      details: redactedDetails,
     },
   });
+
+  const pluginEventType = eventTypeForActivityAction(input.action);
+  if (pluginEventType) {
+    const event: PluginEvent = {
+      eventId: randomUUID(),
+      eventType: pluginEventType,
+      occurredAt: new Date().toISOString(),
+      actorId: input.actorId,
+      actorType: input.actorType,
+      entityId: input.entityId,
+      entityType: input.entityType,
+      companyId: input.companyId,
+      payload: {
+        ...redactedDetails,
+        agentId: input.agentId ?? null,
+        runId: safeRunId,
+      },
+    };
+    publishPluginDomainEvent(event);
+  }
 }

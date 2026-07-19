@@ -8,6 +8,32 @@ It expands the brief plugin notes in [doc/SPEC.md](../SPEC.md) and should be rea
 This is not part of the V1 implementation contract in [doc/SPEC-implementation.md](../SPEC-implementation.md).
 It is the full target architecture for the plugin system that should follow V1.
 
+## Current implementation caveats
+
+The code in this repo now includes an early plugin runtime and admin UI, but it does not yet deliver the full deployment model described in this spec.
+
+Today, the practical deployment model is:
+
+- single-tenant
+- self-hosted
+- single-node or otherwise filesystem-persistent
+
+Current limitations to keep in mind:
+
+- Plugin UI bundles currently run as same-origin JavaScript inside the main Paperclip app. Treat plugin UI as trusted code, not a sandboxed frontend capability boundary.
+- Manifest capabilities currently gate worker-side host RPC calls. They do not prevent plugin UI code from calling ordinary Paperclip HTTP APIs directly.
+- Runtime installs assume a writable local filesystem for the plugin package directory and plugin data directory.
+- Runtime npm installs assume `npm` is available in the running environment and that the host can reach the configured package registry.
+- Published npm packages are the intended install artifact for deployed plugins.
+- The repo example plugins under `packages/plugins/examples/` are development conveniences. They work from a source checkout and should not be assumed to exist in a generic published build unless they are explicitly shipped with that build.
+- Dynamic plugin install is not yet cloud-ready for horizontally scaled or ephemeral deployments. There is no shared artifact store, install coordination, or cross-node distribution layer yet.
+- The current runtime does not yet ship a real host-provided plugin UI component kit, and it does not support plugin asset uploads/reads. Treat those as future-scope ideas in this spec, not current implementation promises.
+- Scoped plugin API routes are JSON-only and must be declared in `apiRoutes`.
+  They mount under `/api/plugins/:pluginId/api/*`; plugins cannot shadow core
+  API routes.
+
+In practice, that means the current implementation is a good fit for local development and self-hosted persistent deployments, but not yet for multi-instance cloud plugin distribution.
+
 ## 1. Scope
 
 This spec covers:
@@ -212,6 +238,8 @@ Suggested layout:
 
 The package install directory and the plugin data directory are separate.
 
+This on-disk model is the reason the current implementation expects a persistent writable host filesystem. Cloud-safe artifact replication is future work.
+
 ## 8.2 Operator Commands
 
 Paperclip should add CLI commands:
@@ -236,6 +264,8 @@ The install process is:
 6. Persist install record in Postgres.
 7. Start plugin worker and run health/validation.
 8. Mark plugin `ready` or `error`.
+
+For the current implementation, this install flow should be read as a single-host workflow. A successful install writes packages to the local host, and other app nodes will not automatically receive that plugin unless a future shared distribution mechanism is added.
 
 ## 9. Load Order And Precedence
 
@@ -597,7 +627,46 @@ Required SDK clients:
 
 Plugins that need filesystem, git, terminal, or process operations handle those directly using standard Node APIs or libraries. The host provides project workspace metadata through `ctx.projects` so plugins can resolve workspace paths, but the host does not proxy low-level OS operations.
 
-## 14.1 Example SDK Shape
+## 14.1 Issue Orchestration APIs
+
+Trusted orchestration plugins can create and update Paperclip issues through `ctx.issues` instead of importing server internals. The public issue contract includes parent/project/goal links, board or agent assignees, blocker IDs, labels, billing code, request depth, execution workspace inheritance, and plugin origin metadata.
+
+Origin rules:
+
+- Built-in core issues keep built-in origins such as `manual` and `routine_execution`.
+- Plugin-managed issues use `plugin:<pluginKey>` or a sub-kind such as `plugin:<pluginKey>:feature`.
+- The host derives the default plugin origin from the installed plugin key and rejects attempts to set `plugin:<otherPluginKey>` origins.
+- `originId` is plugin-defined and should be stable for idempotent generated work.
+
+Relation and read helpers:
+
+- `ctx.issues.relations.get(issueId, companyId)`
+- `ctx.issues.relations.setBlockedBy(issueId, blockerIssueIds, companyId)`
+- `ctx.issues.relations.addBlockers(issueId, blockerIssueIds, companyId)`
+- `ctx.issues.relations.removeBlockers(issueId, blockerIssueIds, companyId)`
+- `ctx.issues.getSubtree(issueId, companyId, options)`
+- `ctx.issues.summaries.getOrchestration({ issueId, companyId, includeSubtree, billingCode })`
+
+Governance helpers:
+
+- `ctx.issues.assertCheckoutOwner({ issueId, companyId, actorAgentId, actorRunId })` lets plugin actions preserve agent-run checkout ownership.
+- `ctx.issues.requestWakeup(issueId, companyId, options)` requests assignment wakeups through host heartbeat semantics, including terminal-status, blocker, assignee, and budget hard-stop checks.
+- `ctx.issues.requestWakeups(issueIds, companyId, options)` applies the same host-owned wakeup semantics to a batch and may use an idempotency key prefix for stable coordinator retries.
+
+Plugin-originated issue, relation, document, comment, and wakeup mutations must write activity entries with `actorType: "plugin"` and details fields for `sourcePluginId`, `sourcePluginKey`, `initiatingActorType`, `initiatingActorId`, and `initiatingRunId` when a user or agent run initiated the plugin work.
+
+Scoped API routes:
+
+- `apiRoutes[]` declares `routeKey`, `method`, plugin-local `path`, `auth`,
+  `capability`, optional checkout policy, and company resolution.
+- The host enforces auth, company access, `api.routes.register`, route matching,
+  and checkout policy before worker dispatch.
+- The worker implements `onApiRequest(input)` and returns a JSON response shape
+  `{ status?, headers?, body? }`.
+- Only safe request headers are forwarded; auth/cookie headers are never passed
+  to the worker.
+
+## 14.2 Example SDK Shape
 
 ```ts
 /** Top-level helper for defining a plugin with type checking */
@@ -669,16 +738,24 @@ The host enforces capabilities in the SDK layer and refuses calls outside the gr
 - `project.workspaces.read`
 - `issues.read`
 - `issue.comments.read`
+- `issue.documents.read`
+- `issue.relations.read`
+- `issue.subtree.read`
 - `agents.read`
 - `goals.read`
 - `activity.read`
 - `costs.read`
+- `issues.orchestration.read`
 
 ### Data Write
 
 - `issues.create`
 - `issues.update`
 - `issue.comments.create`
+- `issue.documents.write`
+- `issue.relations.write`
+- `issues.checkout`
+- `issues.wakeup`
 - `assets.write`
 - `assets.read`
 - `activity.log.write`
@@ -745,6 +822,13 @@ Minimum event set:
 - `issue.created`
 - `issue.updated`
 - `issue.comment.created`
+- `issue.document.created`
+- `issue.document.updated`
+- `issue.document.deleted`
+- `issue.relations.updated`
+- `issue.checked_out`
+- `issue.released`
+- `issue.assignment_wakeup_requested`
 - `agent.created`
 - `agent.updated`
 - `agent.status_changed`
@@ -754,6 +838,8 @@ Minimum event set:
 - `agent.run.cancelled`
 - `approval.created`
 - `approval.decided`
+- `budget.incident.opened`
+- `budget.incident.resolved`
 - `cost_event.created`
 - `activity.logged`
 
@@ -1211,6 +1297,8 @@ Plugin-originated mutations should write:
 
 - `actor_type = plugin`
 - `actor_id = <plugin-id>`
+- details include `sourcePluginId` and `sourcePluginKey`
+- details include `initiatingActorType`, `initiatingActorId`, and `initiatingRunId` when a user or agent run triggered the plugin work
 
 ## 21.5 Plugin Migrations
 

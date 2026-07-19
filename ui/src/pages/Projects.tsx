@@ -1,8 +1,8 @@
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { projectsApi } from "../api/projects";
 import { useCompany } from "../context/CompanyContext";
-import { useDialog } from "../context/DialogContext";
+import { useDialogActions } from "../context/DialogContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
 import { EntityRow } from "../components/EntityRow";
@@ -15,18 +15,22 @@ import { Hexagon, Plus } from "lucide-react";
 
 export function Projects() {
   const { selectedCompanyId } = useCompany();
-  const { openNewProject } = useDialog();
+  const { openNewProject } = useDialogActions();
   const { setBreadcrumbs } = useBreadcrumbs();
 
   useEffect(() => {
     setBreadcrumbs([{ label: "Projects" }]);
   }, [setBreadcrumbs]);
 
-  const { data: projects, isLoading, error } = useQuery({
+  const { data: allProjects, isLoading, error } = useQuery({
     queryKey: queryKeys.projects.list(selectedCompanyId!),
     queryFn: () => projectsApi.list(selectedCompanyId!),
     enabled: !!selectedCompanyId,
   });
+  const projects = useMemo(
+    () => (allProjects ?? []).filter((p) => !p.archivedAt),
+    [allProjects],
+  );
 
   if (!selectedCompanyId) {
     return <EmptyState icon={Hexagon} message="Select a company to view projects." />;
@@ -47,7 +51,7 @@ export function Projects() {
 
       {error && <p className="text-sm text-destructive">{error.message}</p>}
 
-      {projects && projects.length === 0 && (
+      {!isLoading && projects.length === 0 && (
         <EmptyState
           icon={Hexagon}
           message="No projects yet."
@@ -56,7 +60,7 @@ export function Projects() {
         />
       )}
 
-      {projects && projects.length > 0 && (
+      {projects.length > 0 && (
         <div className="border border-border">
           {projects.map((project) => (
             <EntityRow

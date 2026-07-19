@@ -1,6 +1,9 @@
 import type {
+  AgentRole,
+  AgentStatus,
   HeartbeatInvocationSource,
   HeartbeatRunStatus,
+  RunLivenessState,
   WakeupTriggerDetail,
   WakeupRequestStatus,
 } from "../constants.js";
@@ -31,10 +34,63 @@ export interface HeartbeatRun {
   stderrExcerpt: string | null;
   errorCode: string | null;
   externalRunId: string | null;
+  processPid: number | null;
+  processGroupId?: number | null;
+  processStartedAt: Date | null;
+  lastOutputAt: Date | null;
+  lastOutputSeq: number;
+  lastOutputStream: "stdout" | "stderr" | null;
+  lastOutputBytes: number | null;
+  retryOfRunId: string | null;
+  processLossRetryCount: number;
+  scheduledRetryAt?: Date | null;
+  scheduledRetryAttempt?: number;
+  scheduledRetryReason?: string | null;
+  retryExhaustedReason?: string | null;
+  livenessState: RunLivenessState | null;
+  livenessReason: string | null;
+  continuationAttempt: number;
+  lastUsefulActionAt: Date | null;
+  nextAction: string | null;
   contextSnapshot: Record<string, unknown> | null;
   createdAt: Date;
   updatedAt: Date;
+  outputSilence?: HeartbeatRunOutputSilence;
 }
+
+export type HeartbeatRunOutputSilenceLevel =
+  | "not_applicable"
+  | "ok"
+  | "suspicious"
+  | "critical"
+  | "snoozed";
+
+export interface HeartbeatRunOutputSilence {
+  lastOutputAt: Date | string | null;
+  lastOutputSeq: number;
+  lastOutputStream: "stdout" | "stderr" | null;
+  silenceStartedAt: Date | string | null;
+  silenceAgeMs: number | null;
+  level: HeartbeatRunOutputSilenceLevel;
+  suspicionThresholdMs: number;
+  criticalThresholdMs: number;
+  snoozedUntil: Date | string | null;
+  evaluationIssueId: string | null;
+  evaluationIssueIdentifier: string | null;
+  evaluationIssueAssigneeAgentId: string | null;
+}
+
+export interface AgentWakeupSkipped {
+  status: "skipped";
+  reason: string;
+  message: string | null;
+  issueId: string | null;
+  executionRunId: string | null;
+  executionAgentId: string | null;
+  executionAgentName: string | null;
+}
+
+export type AgentWakeupResponse = HeartbeatRun | AgentWakeupSkipped;
 
 export interface HeartbeatRunEvent {
   id: number;
@@ -104,4 +160,21 @@ export interface AgentWakeupRequest {
   error: string | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface InstanceSchedulerHeartbeatAgent {
+  id: string;
+  companyId: string;
+  companyName: string;
+  companyIssuePrefix: string;
+  agentName: string;
+  agentUrlKey: string;
+  role: AgentRole;
+  title: string | null;
+  status: AgentStatus;
+  adapterType: string;
+  intervalSec: number;
+  heartbeatEnabled: boolean;
+  schedulerActive: boolean;
+  lastHeartbeatAt: Date | null;
 }
